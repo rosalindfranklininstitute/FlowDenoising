@@ -520,10 +520,12 @@ class cFlowDenoiser():
             current_time = time.perf_counter()
             if self.timeout_mins > 0:
                 if (current_time - time_0) > (60 * self.timeout_mins):
-                    _thread.interrupt_main() #may not work inside a class                    raise Exception(f"Timeout reached {self.timeout_mins} mins elapsed. Terminating now.")
+                    pass
+                    #_thread.interrupt_main() #may not work inside a class                    raise Exception(f"Timeout reached {self.timeout_mins} mins elapsed. Terminating now.")
             #logging.info(f"{100*__percent__.value/np.sum(data_vol.shape):3.2f} % completed")
             logging.info(f"{__percent__.value} completed")
             time.sleep(1)
+        logging.info("feedback_periodic thread stopped.")
 
 
     def runOpticalFlow(self, data_vol:np.ndarray):
@@ -632,7 +634,9 @@ class cFlowDenoiser():
                 time_1 = time.perf_counter()        
                 logging.info(f"Volume filtered in {time_1 - time_0} seconds")
 
-            return self._filtered_vol
+            result = np.array(self._filtered_vol) #makes a copy, to a non-shared memory space
+
+            return result
         
         except Exception as e:
             logging.error(f"Some error occured: {str(e)}")
