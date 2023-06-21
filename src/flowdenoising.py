@@ -113,11 +113,11 @@ class cFlowDenoiser():
             logging.debug(f"OF computed in {1000*(time_1 - time_0):4.3f} ms, max_X={np.max(flow[0]):+3.2f}, min_X={np.min(flow[0]):+3.2f}, max_Y={np.max(flow[1]):+3.2f}, min_Y={np.min(flow[1]):+3.2f}")
         return flow
     
-    def get_flow_without_prev_flow(reference, target, l=OF_LEVELS, w=OF_WINDOW_SIZE, prev_flow=None):
+    def get_flow_without_prev_flow(self,reference, target, l=OF_LEVELS, w=OF_WINDOW_SIZE, prev_flow=None):
         if __debug__:
             time_0 = time.perf_counter()
         #flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=prev_flow, pyr_scale=0.5, levels=l, winsize=w, iterations=OF_ITERS, poly_n=OF_POLY_N, poly_sigma=OF_POLY_SIGMA, flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
-        flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=None, pyr_scale=0.5, levels=l, winsize=w, iterations=OF_ITERS, poly_n=OF_POLY_N, poly_sigma=OF_POLY_SIGMA, flags=0)
+        flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=None, pyr_scale=0.5, levels=l, winsize=w, iterations=self.OF_ITERS, poly_n=self.OF_POLY_N, poly_sigma=self.OF_POLY_SIGMA, flags=0)
         if __debug__:
             time_1 = time.perf_counter()
             logging.debug(f"OF computed in {1000*(time_1 - time_0):4.3f} ms, max_X={np.max(flow[0]):+3.2f}, min_X={np.min(flow[0]):+3.2f}, max_Y={np.max(flow[1]):+3.2f}, min_Y={np.min(flow[1]):+3.2f}")
@@ -514,14 +514,13 @@ class cFlowDenoiser():
         data_vol[...] = self._filtered_vol[...]
         self.no_OF_filter_along_X(kernels[2])
 
-    @staticmethod
-    def feedback_periodic(stopEv: threading.Event):
-        while not stopEv:
+    def feedback_periodic(self,stopEv: threading.Event):
+        time_0 = time.perf_counter()
+        while not stopEv.is_set():
             current_time = time.perf_counter()
-            if args.timeout > 0:
-                if (current_time - time_0) > (60 * args.timeout):
-                    _thread.interrupt_main()
-                    raise Exception(f"Timeout reached {args.timeout} mins elapsed. Terminating now.")
+            if self.timeout_mins > 0:
+                if (current_time - time_0) > (60 * self.timeout_mins):
+                    _thread.interrupt_main() #may not work inside a class                    raise Exception(f"Timeout reached {self.timeout_mins} mins elapsed. Terminating now.")
             #logging.info(f"{100*__percent__.value/np.sum(data_vol.shape):3.2f} % completed")
             logging.info(f"{__percent__.value} completed")
             time.sleep(1)
@@ -537,8 +536,8 @@ class cFlowDenoiser():
         logging.info(f"shape of the input volume (Z, Y, X) = {data_vol.shape}")
         logging.info(f"type of the volume = {data_vol.dtype}")
         logging.info(f"vol requires {vol_size/(1024*1024):.1f} MB")
-        logging.info(f"{args.input} max = {data_vol.max()}")
-        logging.info(f"{args.input} min = {data_vol.min()}")
+        logging.info(f"data max = {data_vol.max()}")
+        logging.info(f"data min = {data_vol.min()}")
         vol_mean = data_vol.mean()
         logging.info(f"Input vol average = {vol_mean}")
 
@@ -549,6 +548,7 @@ class cFlowDenoiser():
             get_flow = self.get_flow_with_prev_flow
             logging.info("Using adjacent OF fields as predictions")
 
+        sigma=self.sigma
         logging.info(f"sigma={tuple(sigma)}")
 
         kernels = [None]*3
@@ -608,7 +608,7 @@ class cFlowDenoiser():
 
             #feddback_thread = threading.Thread(target=feedback_periodic)
             stopEv=threading.Event()
-            feddback_thread = threading.Thread(target=self.feedback_periodic, args=(stopEv))
+            feddback_thread = threading.Thread(target=self.feedback_periodic, args=(stopEv,))
             feddback_thread.daemon = True # To obey CTRL+C interruption.
             #This also means that the thread is killed when the program exits
             feddback_thread.start()
