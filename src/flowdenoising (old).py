@@ -2,12 +2,20 @@
 '''3D Gaussian filtering controlled by the optical flow.
 '''
 
-# "flowdenoising.py" is part of "https://github.com/microscopy-processing/FlowDenoising", authored by:
+#
+# "flowdenoising.py" is part of
+# "https://github.com/microscopy-processing/FlowDenoising", authored
+# by:
 #
 # * J.J. Fernández (CSIC).
 # * V. González-Ruiz (UAL).
 #
-# Please, refer to the LICENSE.txt to know the terms of usage of this software.
+# This code implements multiple-processing Gaussian filtering of 3D
+# data.
+#
+# Please, refer to the LICENSE.txt to know the terms of usage of this
+# software.
+#
 
 import logging
 import os
@@ -15,45 +23,23 @@ import numpy as np
 import cv2
 import scipy.ndimage
 import time
-# import imageio
-# import tifffile
+import imageio
+import tifffile
 import skimage.io
 import mrcfile
 import argparse
 import threading
+import time
+from shared_code import *
 
-# import concurrent
+import concurrent
 import multiprocessing
 from multiprocessing import shared_memory, Value
 from concurrent.futures.process import ProcessPoolExecutor
-import random
-import _thread
-import sys
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
 __percent__ = Value('f', 0)
-
-def get_gaussian_kernel(sigma=1):
-    logging.info(f"Computing gaussian kernel with sigma={sigma}")
-    number_of_coeffs = 3
-    number_of_zeros = 0
-    while number_of_zeros < 2 :
-        delta = np.zeros(number_of_coeffs)
-        delta[delta.size//2] = 1
-        coeffs = scipy.ndimage.gaussian_filter1d(delta, sigma=sigma)
-        number_of_zeros = coeffs.size - np.count_nonzero(coeffs)
-        number_of_coeffs += 1
-    logging.debug("Kernel computed")
-    return coeffs[1:-1]
-
-OFCA_EXTENSION_MODE = cv2.BORDER_REPLICATE
-OF_LEVELS = 3
-OF_WINDOW_SIZE = 5
-OF_ITERS = 3
-OF_POLY_N = 5
-OF_POLY_SIGMA = 1.2
-SIGMA = 2.0
 
 def warp_slice(reference, flow):
     height, width = flow.shape[:2]
@@ -63,21 +49,11 @@ def warp_slice(reference, flow):
     warped_slice = cv2.remap(reference, map_xy, None, interpolation=cv2.INTER_LINEAR, borderMode=OFCA_EXTENSION_MODE)
     return warped_slice
 
-def get_flow_with_prev_flow(reference, target, l=OF_LEVELS, w=OF_WINDOW_SIZE, prev_flow=None):
+def get_flow(reference, target, l=OF_LEVELS, w=OF_WINDOW_SIZE, prev_flow=None):
     if __debug__:
         time_0 = time.perf_counter()
     flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=prev_flow, pyr_scale=0.5, levels=l, winsize=w, iterations=OF_ITERS, poly_n=OF_POLY_N, poly_sigma=OF_POLY_SIGMA, flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
     #flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=None, pyr_scale=0.5, levels=l, winsize=w, iterations=OF_ITERS, poly_n=OF_POLY_N, poly_sigma=OF_POLY_SIGMA, flags=0)
-    if __debug__:
-        time_1 = time.perf_counter()
-        logging.debug(f"OF computed in {1000*(time_1 - time_0):4.3f} ms, max_X={np.max(flow[0]):+3.2f}, min_X={np.min(flow[0]):+3.2f}, max_Y={np.max(flow[1]):+3.2f}, min_Y={np.min(flow[1]):+3.2f}")
-    return flow
-
-def get_flow_without_prev_flow(reference, target, l=OF_LEVELS, w=OF_WINDOW_SIZE, prev_flow=None):
-    if __debug__:
-        time_0 = time.perf_counter()
-    #flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=prev_flow, pyr_scale=0.5, levels=l, winsize=w, iterations=OF_ITERS, poly_n=OF_POLY_N, poly_sigma=OF_POLY_SIGMA, flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
-    flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=None, pyr_scale=0.5, levels=l, winsize=w, iterations=OF_ITERS, poly_n=OF_POLY_N, poly_sigma=OF_POLY_SIGMA, flags=0)
     if __debug__:
         time_1 = time.perf_counter()
         logging.debug(f"OF computed in {1000*(time_1 - time_0):4.3f} ms, max_X={np.max(flow[0]):+3.2f}, min_X={np.min(flow[0]):+3.2f}, max_Y={np.max(flow[1]):+3.2f}, min_Y={np.min(flow[1]):+3.2f}")
@@ -102,7 +78,7 @@ def OF_filter_along_Z_slice(z, kernel):
         prev_flow = flow
         OF_compensated_slice = warp_slice(vol[(z + i - ks2) % vol.shape[0], :, :], flow)
         tmp_slice += OF_compensated_slice * kernel[i]
-    _filtered_vol[z, :, :] = tmp_slice
+    filtered_vol[z, :, :] = tmp_slice
     __percent__.value += 1
 
 def OF_filter_along_Y_slice(y, kernel):
@@ -124,7 +100,7 @@ def OF_filter_along_Y_slice(y, kernel):
         prev_flow = flow
         OF_compensated_slice = warp_slice(vol[:, (y + i - ks2) % vol.shape[1], :], flow)
         tmp_slice += OF_compensated_slice * kernel[i]
-    _filtered_vol[:, y, :] = tmp_slice
+    filtered_vol[:, y, :] = tmp_slice
     __percent__.value += 1
 
 def OF_filter_along_X_slice(x, kernel):
@@ -146,7 +122,7 @@ def OF_filter_along_X_slice(x, kernel):
         prev_flow = flow
         OF_compensated_slice = warp_slice(vol[:, :, (x + i - ks2) % vol.shape[2]], flow)
         tmp_slice += OF_compensated_slice * kernel[i]
-    _filtered_vol[:, :, x] = tmp_slice
+    filtered_vol[:, :, x] = tmp_slice
     __percent__.value += 1
 
 def OF_filter_along_Z_chunk(chunk_index, chunk_size, chunk_offset, kernel):
@@ -293,9 +269,9 @@ def OF_filter_along_X(kernel, l, w):
 
 def OF_filter(kernels, l, w):
     OF_filter_along_Z(kernels[0], l, w)
-    vol[...] = _filtered_vol[...]
+    vol[...] = filtered_vol[...]
     OF_filter_along_Y(kernels[1], l, w)
-    vol[...] = _filtered_vol[...]
+    vol[...] = filtered_vol[...]
     OF_filter_along_X(kernels[2], l, w)
 
 def no_OF_filter_along_Z_slice(z, kernel):
@@ -303,7 +279,7 @@ def no_OF_filter_along_Z_slice(z, kernel):
     tmp_slice = np.zeros(shape=(vol.shape[1], vol.shape[2]), dtype=np.float32)
     for i in range(kernel.size):
         tmp_slice += vol[(z + i - ks2) % vol.shape[0], :, :]*kernel[i]
-    _filtered_vol[z, :, :] = tmp_slice
+    filtered_vol[z, :, :] = tmp_slice
     __percent__.value += 1
 
 def no_OF_filter_along_Y_slice(y, kernel):
@@ -311,7 +287,7 @@ def no_OF_filter_along_Y_slice(y, kernel):
     tmp_slice = np.zeros(shape=(vol.shape[0], vol.shape[2]), dtype=np.float32)
     for i in range(kernel.size):
         tmp_slice += vol[:, (y + i - ks2) % vol.shape[1], :]*kernel[i]
-    _filtered_vol[:, y, :] = tmp_slice
+    filtered_vol[:, y, :] = tmp_slice
     __percent__.value += 1
 
 def no_OF_filter_along_X_slice(x, kernel):
@@ -319,7 +295,7 @@ def no_OF_filter_along_X_slice(x, kernel):
     tmp_slice = np.zeros(shape=(vol.shape[0], vol.shape[1]), dtype=np.float32)
     for i in range(kernel.size):
         tmp_slice += vol[:, :, (x + i - ks2) % vol.shape[2]]*kernel[i]
-    _filtered_vol[:, :, x] = tmp_slice
+    filtered_vol[:, :, x] = tmp_slice
     __percent__.value += 1
 
 def no_OF_filter_along_Z_chunk(chunk_index, chunk_size, chunk_offset, kernel):
@@ -455,9 +431,9 @@ def no_OF_filter_along_X(kernel):
 
 def no_OF_filter(kernels):
     no_OF_filter_along_Z(kernels[0])
-    vol[...] = _filtered_vol[...]
+    vol[...] = filtered_vol[...]
     no_OF_filter_along_Y(kernels[1])
-    vol[...] = _filtered_vol[...]
+    vol[...] = filtered_vol[...]
     no_OF_filter_along_X(kernels[2])
 
 def int_or_str(text):
@@ -467,13 +443,8 @@ def int_or_str(text):
     except ValueError:
         return text
 
-def feedback_periodic(stopEv: threading.Event):
-    while not stopEv:
-        current_time = time.perf_counter()
-        if args.timeout > 0:
-            if (current_time - time_0) > (60 * args.timeout):
-                _thread.interrupt_main()
-                raise Exception(f"Timeout reached {args.timeout} mins elapsed. Terminating now.")
+def feedback():
+    while True:
         logging.info(f"{100*__percent__.value/np.sum(vol.shape):3.2f} % completed")
         time.sleep(1)
 
@@ -508,196 +479,154 @@ parser.add_argument("-m", "--memory_map",
 parser.add_argument("-p", "--number_of_processes", type=int_or_str,
                     help="Maximum number of processes",
                     default=number_of_PUs)
-parser.add_argument("--recompute_flow", action="store_true", help="Disable the use of adjacent optical flow fields")
-parser.add_argument("--timeout", type=int, help="Timeout after x mins. Set to -1 for no timeout. Default 30 mins", default=30)
+#parser.add_argument("--recompute_flow", action="store_true", help="Disable the use of adjacent optical flow fields")
 
 def show_memory_usage(msg=''):
     logging.info(f"{psutil.Process(os.getpid()).memory_info().rss/(1024*1024):.1f} MB used in process {os.getpid()} {msg}")
 
 if __name__ == "__main__":
 
-    try:
+    parser.description = __doc__
+    args = parser.parse_args()
 
-        parser.description = __doc__
-        args = parser.parse_args()
+    if args.verbosity == 2:
+        logging.basicConfig(format=LOGGING_FORMAT, level=logging.DEBUG)
+        logging.info("Verbosity level = 2")
+    elif args.verbosity == 1:
+        logging.basicConfig(format=LOGGING_FORMAT, level=logging.INFO)
+        logging.info("Verbosity level = 1")        
+    else:
+        logging.basicConfig(format=LOGGING_FORMAT, level=logging.CRITICAL)
 
-        if args.verbosity == 2:
-            logging.basicConfig(format=LOGGING_FORMAT, level=logging.DEBUG)
-            logging.info("Verbosity level = 2")
-        elif args.verbosity == 1:
-            logging.basicConfig(format=LOGGING_FORMAT, level=logging.INFO)
-            logging.info("Verbosity level = 1")        
+    #if args.recompute_flow:
+    #    get_flow = get_flow_without_prev_flow
+    #    logging.info("No reusing adjacent OF fields as predictions")
+    #else:
+    #    get_flow = get_flow_with_prev_flow
+    #    logging.info("Using adjacent OF fields as predictions")
+
+    logging.info(f"Number of processing units: {number_of_PUs}")
+        
+    sigma = [float(i) for i in args.sigma]
+    logging.info(f"sigma={tuple(sigma)}")
+    l = args.levels
+    w = args.winsize
+    
+    #logging.debug(f"Using transpose pattern {args.transpose} {type(args.transpose)}")
+    #transpose_pattern = tuple([int(i) for i in args.transpose])
+    #logging.info(f"transpose={transpose_pattern}")
+
+    if __debug__:
+        logging.info(f"reading \"{args.input}\"")
+        time_0 = time.perf_counter()
+
+    logging.debug(f"input = {args.input}")
+
+    MRC_input = ( args.input.split('.')[-1] == "MRC" or args.input.split('.')[-1] == "mrc" )
+    if MRC_input:
+        if args.memory_map:
+            logging.info(f"Using memory mapping")
+            vol_MRC = rc = mrcfile.mmap(args.input, mode='r+')
         else:
-            logging.basicConfig(format=LOGGING_FORMAT, level=logging.CRITICAL)
+            vol_MRC = mrcfile.open(args.input, mode="r+")
+        vol = vol_MRC.data
+    else:
+        vol = skimage.io.imread(args.input, plugin="tifffile").astype(np.float32)
+    vol_size = vol.dtype.itemsize * vol.size
+    logging.info(f"shape of the input volume (Z, Y, X) = {vol.shape}")
+    logging.info(f"type of the volume = {vol.dtype}")
+    logging.info(f"vol requires {vol_size/(1024*1024):.1f} MB")
+    logging.info(f"{args.input} max = {vol.max()}")
+    logging.info(f"{args.input} min = {vol.min()}")
+    vol_mean = vol.mean()
+    logging.info(f"Input vol average = {vol_mean}")
 
-        if args.recompute_flow:
-            get_flow = get_flow_without_prev_flow
-            logging.info("No reusing adjacent OF fields as predictions")
-        else:
-            get_flow = get_flow_with_prev_flow
-            logging.info("Using adjacent OF fields as predictions")
+    if __debug__:
+        time_1 = time.perf_counter()
+        logging.info(f"read \"{args.input}\" in {time_1 - time_0} seconds")
 
-        logging.info(f"Number of processing units: {number_of_PUs}")
-            
-        sigma = [float(i) for i in args.sigma]
-        logging.info(f"sigma={tuple(sigma)}")
-        l = args.levels
-        w = args.winsize
-        
-        #logging.debug(f"Using transpose pattern {args.transpose} {type(args.transpose)}")
-        #transpose_pattern = tuple([int(i) for i in args.transpose])
-        #logging.info(f"transpose={transpose_pattern}")
+    kernels = [None]*3
+    kernels[0] = get_gaussian_kernel(sigma[0])
+    kernels[1] = get_gaussian_kernel(sigma[1])
+    kernels[2] = get_gaussian_kernel(sigma[2])
+    logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
 
-        if __debug__:
-            logging.info(f"reading \"{args.input}\"")
-            time_0 = time.perf_counter()
+    # Copy the volume to shared memory
+    SM_vol = shared_memory.SharedMemory(
+        create=True,
+        size=vol_size,
+        name="vol") # See /dev/shm/
+    _vol = np.ndarray(
+        shape=vol.shape,
+        dtype=vol.dtype,
+        buffer=SM_vol.buf)
+    _vol[...] = vol[...]
+    vol = _vol
 
-        logging.debug(f"input = {args.input}")
+    SM_filtered_vol = shared_memory.SharedMemory(
+        create=True,
+        size=vol_size,
+        name="filtered_vol") # See /dev/shm
+    filtered_vol = np.ndarray(
+        shape=vol.shape,
+        dtype=vol.dtype,
+        buffer=SM_filtered_vol.buf)
+    filtered_vol.fill(0)
+    
+    #vol = np.transpose(vol, transpose_pattern)
+    #logging.info(f"After transposing, shape of the volume to denoise (Z, Y, X) = {vol.shape}")
 
-        is_MRC_input = ( args.input.split('.')[-1] == "MRC" or args.input.split('.')[-1] == "mrc" )
-        if is_MRC_input:
-            if args.memory_map:
-                logging.info(f"Using memory mapping")
-                vol_MRC = rc = mrcfile.mmap(args.input, mode='r+')
-            else:
-                vol_MRC = mrcfile.open(args.input, mode="r+")
-            vol = vol_MRC.data
-        else:
-            vol = skimage.io.imread(args.input, plugin="tifffile").astype(np.float32)
-        vol_size = vol.dtype.itemsize * vol.size
-        logging.info(f"shape of the input volume (Z, Y, X) = {vol.shape}")
-        logging.info(f"type of the volume = {vol.dtype}")
-        logging.info(f"vol requires {vol_size/(1024*1024):.1f} MB")
-        logging.info(f"{args.input} max = {vol.max()}")
-        logging.info(f"{args.input} min = {vol.min()}")
-        vol_mean = vol.mean()
-        logging.info(f"Input vol average = {vol_mean}")
+    logging.info(f"Number of available processing units: {number_of_PUs}")
+    number_of_processes = args.number_of_processes
+    logging.info(f"Number of concurrent processes: {number_of_processes}")
+    
+    thread = threading.Thread(target=feedback)
+    thread.daemon = True # To obey CTRL+C interruption.
+    thread.start()
 
-        if __debug__:
-            time_1 = time.perf_counter()
-            logging.info(f"read \"{args.input}\" in {time_1 - time_0} seconds")
+    if __debug__:
+        logging.info(f"Filtering ...")
+        #time_0 = time.perf_counter()
+        time_0 = time.perf_counter()
 
-        kernels = [None]*3
-        kernels[0] = get_gaussian_kernel(sigma[0])
-        kernels[1] = get_gaussian_kernel(sigma[1])
-        kernels[2] = get_gaussian_kernel(sigma[2])
-        logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
+    if args.no_OF:
+        no_OF_filter(kernels)
+    else:
+        OF_filter(kernels, l, w)
 
-        # Copy the volume to shared memory
-        randint0 = random.randint(0,999999)
+    if __debug__:
+        #time_1 = time.perf_counter()        
+        time_1 = time.perf_counter()        
+        logging.info(f"Volume filtered in {time_1 - time_0} seconds")
 
-        SM_vol=None
-        SM_filtered_vol=None
+    #filtered_vol = np.transpose(filtered_vol, transpose_pattern)
+    logging.info(f"{args.output} type = {filtered_vol.dtype}")
+    logging.info(f"{args.output} max = {filtered_vol.max()}")
+    logging.info(f"{args.output} min = {filtered_vol.min()}")
+    logging.info(f"{args.output} average = {filtered_vol.mean()}")
+    
+    if __debug__:
+        logging.info(f"writting \"{args.output}\"")
+        time_0 = time.perf_counter()
 
-        try:
-            SM_vol = shared_memory.SharedMemory(
-                create=True,
-                size=vol_size,
-                name="vol"+str(randint0)) # See /dev/shm/
-        except Exception as sm_vol_e:
-            sys.exit("Error creating shared memory SM_vol: {sm_vol_e}")
+    logging.debug(f"output = {args.output}")
 
-        #_vol is a global variable!
-        _vol = np.ndarray(
-            shape=vol.shape,
-            dtype=vol.dtype,
-            buffer=SM_vol.buf)
-        _vol[...] = vol[...]
-        vol = _vol
+    MRC_output = ( args.output.split('.')[-1] == "MRC" or args.output.split('.')[-1] == "mrc" )
 
-        try:
-            SM_filtered_vol = shared_memory.SharedMemory(
-                create=True,
-                size=vol_size,
-                name="filtered_vol"+str(randint0)) # See /dev/shm
-        except Exception as sm_filtered_vol_e:
-            #logging.error(f"Error: {sm_filtered_vol_e}")
-            SM_vol.close()
-            SM_vol.unlink()
-            sys.exit("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
+    if MRC_output:
+        logging.debug(f"Writting MRC file")
+        with mrcfile.new(args.output, overwrite=True) as mrc:
+            mrc.set_data(filtered_vol.astype(np.float32))
+            mrc.data
+    else:
+        logging.debug(f"Writting TIFF file")
+        skimage.io.imsave(args.output, filtered_vol.astype(np.float32), plugin="tifffile")
 
-        #_filtered_vol is a global variable
-        _filtered_vol = np.ndarray(
-            shape=vol.shape,
-            dtype=vol.dtype,
-            buffer=SM_filtered_vol.buf)
-        _filtered_vol.fill(0)
-        
-        #vol = np.transpose(vol, transpose_pattern)
-        #logging.info(f"After transposing, shape of the volume to denoise (Z, Y, X) = {vol.shape}")
-
-        logging.info(f"Number of available processing units: {number_of_PUs}")
-        number_of_processes = args.number_of_processes
-        logging.info(f"Number of concurrent processes: {number_of_processes}")
-        
-        #feddback_thread = threading.Thread(target=feedback_periodic)
-        stopEv=threading.Event()
-        feddback_thread = threading.Thread(target=feedback_periodic, args=(stopEv))
-        feddback_thread.daemon = True # To obey CTRL+C interruption.
-        #This also means that the thread is killed when the program exits
-
-        feddback_thread.start()
-
-        if __debug__:
-            logging.info(f"Filtering ...")
-            time_0 = time.perf_counter()
-
-        #Starts filtering
-        if args.no_OF:
-            no_OF_filter(kernels) #Filters without optical flow
-        else:
-            OF_filter(kernels, l, w) #Filters with optical flow
-
-        #When filtering is complete it continues here
-        #stop feedback_thread.
-        # There no stop() function to do that, so Event() is used
-        stopEv.set()
-
-        if __debug__:
-            #time_1 = time.perf_counter()        
-            time_1 = time.perf_counter()        
-            logging.info(f"Volume filtered in {time_1 - time_0} seconds")
-
-        #filtered_vol = np.transpose(filtered_vol, transpose_pattern)
-        logging.info(f"{args.output} type = {_filtered_vol.dtype}")
-        logging.info(f"{args.output} max = {_filtered_vol.max()}")
-        logging.info(f"{args.output} min = {_filtered_vol.min()}")
-        logging.info(f"{args.output} average = {_filtered_vol.mean()}")
-        
-        if __debug__:
-            logging.info(f"writting \"{args.output}\"")
-            time_0 = time.perf_counter()
-
-        logging.debug(f"output = {args.output}")
-
-        MRC_output = ( args.output.split('.')[-1] == "MRC" or args.output.split('.')[-1] == "mrc" )
-
-        if MRC_output:
-            logging.debug(f"Writting MRC file")
-            with mrcfile.new(args.output, overwrite=True) as mrc:
-                mrc.set_data(_filtered_vol.astype(np.float32))
-                mrc.data
-        else:
-            logging.debug(f"Writting TIFF file")
-            skimage.io.imsave(args.output, _filtered_vol.astype(np.float32), plugin="tifffile")
-
-        if __debug__:
-            time_1 = time.perf_counter()        
-            logging.info(f"written \"{args.output}\" in {time_1 - time_0} seconds")
-
-        # SM_vol.close()
-        # SM_vol.unlink()
-        # SM_filtered_vol.close()
-        # SM_filtered_vol.unlink()
-        
-
-    except Exception as e:
-        logging.error(f"error occured: {str(e)}")
-        
-
-    finally:
-        logging.info("Closing and unlinking shared memory")
-        SM_vol.close()
-        SM_vol.unlink()
-        SM_filtered_vol.close()
-        SM_filtered_vol.unlink()
+    SM_vol.close()
+    SM_vol.unlink()
+    SM_filtered_vol.close()
+    SM_filtered_vol.unlink()
+    
+    if __debug__:
+        time_1 = time.perf_counter()        
+        logging.info(f"written \"{args.output}\" in {time_1 - time_0} seconds")
