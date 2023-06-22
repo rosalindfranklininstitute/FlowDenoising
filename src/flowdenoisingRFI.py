@@ -9,6 +9,14 @@
 #
 # Please, refer to the LICENSE.txt to know the terms of usage of this software.
 
+"""
+2023 Significantly modified version by Luis Perdigao @RFI
+
+Code put in a class so that it potentially run in a notebook or integrated in other programs
+
+
+"""
+
 import logging
 import os
 import numpy as np
@@ -32,7 +40,9 @@ import sys
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
-__percent__ = Value('f', 0)
+__fdn_progress_sm_value__ = Value('f', 0)
+
+FDN_LIZZIE="Is great"
 
 class cFlowDenoiser():
     OFCA_EXTENSION_MODE = cv2.BORDER_REPLICATE
@@ -43,8 +53,10 @@ class cFlowDenoiser():
     OF_POLY_SIGMA = 1.2
     #SIGMA = 2.0
 
-    data_vol=None
+    _data_vol=None
     _filtered_vol=None
+
+    #__percent__ = Value('f', 0)
 
     def __init__(self, *,
         sigma=(2.0,2.0,2.0),
@@ -123,396 +135,534 @@ class cFlowDenoiser():
             logging.debug(f"OF computed in {1000*(time_1 - time_0):4.3f} ms, max_X={np.max(flow[0]):+3.2f}, min_X={np.min(flow[0]):+3.2f}, max_Y={np.max(flow[1]):+3.2f}, min_Y={np.min(flow[1]):+3.2f}")
         return flow
 
-    def OF_filter_along_Z_slice(self,z, kernel):
-        data_vol=self.data_vol
-        ks2 = kernel.size//2
-        tmp_slice = np.zeros_like(data_vol[z, :, :]).astype(np.float32)
-        assert kernel.size % 2 != 0 # kernel.size must be odd
-        prev_flow = np.zeros(shape=(data_vol.shape[1], data_vol.shape[2], 2), dtype=np.float32)
-        for i in range(ks2 - 1, -1, -1):
-            flow = self.get_flow(data_vol[(z + i - ks2) % data_vol.shape[0], :, :],
-                            data_vol[z, :, :], self.levels, self.winsize, prev_flow)
-            prev_flow = flow
-            OF_compensated_slice = self.warp_slice(data_vol[(z + i - ks2) % data_vol.shape[0], :, :], flow)
-            tmp_slice += OF_compensated_slice * kernel[i]
-        tmp_slice += data_vol[z, :, :] * kernel[ks2]
-        prev_flow = np.zeros(shape=(data_vol.shape[1], data_vol.shape[2], 2), dtype=np.float32)
-        for i in range(ks2 + 1, kernel.size):
-            flow = self.get_flow(data_vol[(z + i - ks2) % data_vol.shape[0], :, :],
-                            data_vol[z, :, :], self.levels, self.winsize, prev_flow)
-            prev_flow = flow
-            OF_compensated_slice = self.warp_slice(data_vol[(z + i - ks2) % data_vol.shape[0], :, :], flow)
-            tmp_slice += OF_compensated_slice * kernel[i]
-        self._filtered_vol[z, :, :] = tmp_slice
-        __percent__.value += 1
+    # def OF_filter_along_Z_slice(self,z, kernel):
+    #     data_vol=self._data_vol
+    #     ks2 = kernel.size//2
+    #     tmp_slice = np.zeros_like(data_vol[z, :, :]).astype(np.float32)
+    #     assert kernel.size % 2 != 0 # kernel.size must be odd
+    #     prev_flow = np.zeros(shape=(data_vol.shape[1], data_vol.shape[2], 2), dtype=np.float32)
+    #     for i in range(ks2 - 1, -1, -1):
+    #         flow = self.get_flow(data_vol[(z + i - ks2) % data_vol.shape[0], :, :],
+    #                         data_vol[z, :, :], self.levels, self.winsize, prev_flow)
+    #         prev_flow = flow
+    #         OF_compensated_slice = self.warp_slice(data_vol[(z + i - ks2) % data_vol.shape[0], :, :], flow)
+    #         tmp_slice += OF_compensated_slice * kernel[i]
+    #     tmp_slice += data_vol[z, :, :] * kernel[ks2]
+    #     prev_flow = np.zeros(shape=(data_vol.shape[1], data_vol.shape[2], 2), dtype=np.float32)
+    #     for i in range(ks2 + 1, kernel.size):
+    #         flow = self.get_flow(data_vol[(z + i - ks2) % data_vol.shape[0], :, :],
+    #                         data_vol[z, :, :], self.levels, self.winsize, prev_flow)
+    #         prev_flow = flow
+    #         OF_compensated_slice = self.warp_slice(data_vol[(z + i - ks2) % data_vol.shape[0], :, :], flow)
+    #         tmp_slice += OF_compensated_slice * kernel[i]
+    #     self._filtered_vol[z, :, :] = tmp_slice
+    #     self.__percent__.value += 1
 
-    def OF_filter_along_Y_slice(self,y, kernel):
-        data_vol=self.data_vol
-        ks2 = kernel.size//2
-        tmp_slice = np.zeros_like(data_vol[:, y, :]).astype(np.float32)
-        assert kernel.size % 2 != 0 # kernel.size must be odd
-        prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[2], 2), dtype=np.float32)
-        for i in range(ks2 - 1, -1, -1):
-            flow = self.get_flow(data_vol[:, (y + i - ks2) % data_vol.shape[1], :],
-                            data_vol[:, y, :], self.levels, self.winsize, prev_flow)
-            prev_flow = flow
-            OF_compensated_slice = self.warp_slice(data_vol[:, (y + i - ks2) % data_vol.shape[1], :], flow)
-            tmp_slice += OF_compensated_slice * kernel[i]
-        tmp_slice += data_vol[:, y, :] * kernel[ks2]
-        prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[2], 2), dtype=np.float32)
-        for i in range(ks2 + 1, kernel.size):
-            flow = self.get_flow(data_vol[:, (y + i - ks2) % data_vol.shape[1], :],
-                            data_vol[:, y, :], self.levels, self.winsize, prev_flow)
-            prev_flow = flow
-            OF_compensated_slice = self.warp_slice(data_vol[:, (y + i - ks2) % data_vol.shape[1], :], flow)
-            tmp_slice += OF_compensated_slice * kernel[i]
-        self._filtered_vol[:, y, :] = tmp_slice
-        __percent__.value += 1
+    # def OF_filter_along_Y_slice(self,y, kernel):
+    #     data_vol=self._data_vol
+    #     ks2 = kernel.size//2
+    #     tmp_slice = np.zeros_like(data_vol[:, y, :]).astype(np.float32)
+    #     assert kernel.size % 2 != 0 # kernel.size must be odd
+    #     prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[2], 2), dtype=np.float32)
+    #     for i in range(ks2 - 1, -1, -1):
+    #         flow = self.get_flow(data_vol[:, (y + i - ks2) % data_vol.shape[1], :],
+    #                         data_vol[:, y, :], self.levels, self.winsize, prev_flow)
+    #         prev_flow = flow
+    #         OF_compensated_slice = self.warp_slice(data_vol[:, (y + i - ks2) % data_vol.shape[1], :], flow)
+    #         tmp_slice += OF_compensated_slice * kernel[i]
+    #     tmp_slice += data_vol[:, y, :] * kernel[ks2]
+    #     prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[2], 2), dtype=np.float32)
+    #     for i in range(ks2 + 1, kernel.size):
+    #         flow = self.get_flow(data_vol[:, (y + i - ks2) % data_vol.shape[1], :],
+    #                         data_vol[:, y, :], self.levels, self.winsize, prev_flow)
+    #         prev_flow = flow
+    #         OF_compensated_slice = self.warp_slice(data_vol[:, (y + i - ks2) % data_vol.shape[1], :], flow)
+    #         tmp_slice += OF_compensated_slice * kernel[i]
+    #     self._filtered_vol[:, y, :] = tmp_slice
+    #     self.__percent__.value += 1
 
-    def OF_filter_along_X_slice(self,x, kernel):
-        data_vol=self.data_vol
-        ks2 = kernel.size//2
-        tmp_slice = np.zeros_like(data_vol[:, :, x]).astype(np.float32)
-        assert kernel.size % 2 != 0 # kernel.size must be odd
-        prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[1], 2), dtype=np.float32)
-        for i in range(ks2 - 1, -1, -1):
-            flow = self.get_flow(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]],
-                            data_vol[:, :, x], self.OF_LEVELS, self.OF_WINDOW_SIZE, prev_flow)
-            prev_flow = flow
-            OF_compensated_slice = self.warp_slice(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]], flow)
-            tmp_slice += OF_compensated_slice * kernel[i]
-        tmp_slice += data_vol[:, :, x] * kernel[ks2]
-        prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[1], 2), dtype=np.float32)
-        for i in range(ks2 + 1, kernel.size):
-            flow = self.get_flow(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]],
-                            data_vol[:, :, x], self.OF_LEVELS, self.OF_WINDOW_SIZE, prev_flow)
-            prev_flow = flow
-            OF_compensated_slice = self.warp_slice(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]], flow)
-            tmp_slice += OF_compensated_slice * kernel[i]
-        self._filtered_vol[:, :, x] = tmp_slice
-        __percent__.value += 1
+    # def OF_filter_along_X_slice(self,x, kernel):
+    #     data_vol=self._data_vol
+    #     ks2 = kernel.size//2
+    #     tmp_slice = np.zeros_like(data_vol[:, :, x]).astype(np.float32)
+    #     assert kernel.size % 2 != 0 # kernel.size must be odd
+    #     prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[1], 2), dtype=np.float32)
+    #     for i in range(ks2 - 1, -1, -1):
+    #         flow = self.get_flow(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]],
+    #                         data_vol[:, :, x], self.OF_LEVELS, self.OF_WINDOW_SIZE, prev_flow)
+    #         prev_flow = flow
+    #         OF_compensated_slice = self.warp_slice(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]], flow)
+    #         tmp_slice += OF_compensated_slice * kernel[i]
+    #     tmp_slice += data_vol[:, :, x] * kernel[ks2]
+    #     prev_flow = np.zeros(shape=(data_vol.shape[0], data_vol.shape[1], 2), dtype=np.float32)
+    #     for i in range(ks2 + 1, kernel.size):
+    #         flow = self.get_flow(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]],
+    #                         data_vol[:, :, x], self.OF_LEVELS, self.OF_WINDOW_SIZE, prev_flow)
+    #         prev_flow = flow
+    #         OF_compensated_slice = self.warp_slice(data_vol[:, :, (x + i - ks2) % data_vol.shape[2]], flow)
+    #         tmp_slice += OF_compensated_slice * kernel[i]
+    #     self._filtered_vol[:, :, x] = tmp_slice
+    #     self.__percent__.value += 1
 
-    def OF_filter_along_Z_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
-        for z in range(chunk_size):
-            self.OF_filter_along_Z_slice(chunk_index*chunk_size + z + chunk_offset, kernel)
-        return chunk_index
+    # def OF_filter_along_Z_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
+    #     for z in range(chunk_size):
+    #         self.OF_filter_along_Z_slice(chunk_index*chunk_size + z + chunk_offset, kernel)
+    #     return chunk_index
 
-    def OF_filter_along_Y_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
-        for y in range(chunk_size):
-            self.OF_filter_along_Y_slice(chunk_index*chunk_size + y + chunk_offset, kernel)
-        return chunk_index
+    # def OF_filter_along_Y_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
+    #     for y in range(chunk_size):
+    #         self.OF_filter_along_Y_slice(chunk_index*chunk_size + y + chunk_offset, kernel)
+    #     return chunk_index
 
-    def OF_filter_along_X_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
-        for x in range(chunk_size):
-            self.OF_filter_along_X_slice(chunk_index*chunk_size + x + chunk_offset, kernel)
-        return chunk_index
+    # def OF_filter_along_X_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
+    #     for x in range(chunk_size):
+    #         self.OF_filter_along_X_slice(chunk_index*chunk_size + x + chunk_offset, kernel)
+    #     return chunk_index
         
-    def OF_filter_along_Z(self,kernel, l, w):
-        data_vol=self.data_vol
-        global __percent__
-        logging.info(f"Filtering along Z with l={l}, w={w}, and kernel length={kernel.size}")
+    # def OF_filter_along_Z(self,kernel, l, w):
+    #     data_vol=self._data_vol
+    #     #global __percent__
+    #     logging.info(f"Filtering along Z with l={l}, w={w}, and kernel length={kernel.size}")
+
+    #     if __debug__:
+    #         time_0 = time.perf_counter()
+    #         min_OF = 1000
+    #         max_OF = -1000
+
+    #     Z_dim = data_vol.shape[0]
+    #     chunk_size = Z_dim//self.max_number_of_processes
+    #     #for i in range(number_of_processes):
+    #     #    OF_filter_along_Z_chunk(i, padded_vol, kernel)
+    #     chunk_indexes = [i for i in range(self.max_number_of_processes)]
+    #     chunk_sizes = [chunk_size]*self.max_number_of_processes
+    #     chunk_offsets = [0]*self.max_number_of_processes
+    #     kernels = [kernel]*self.max_number_of_processes
+    #     with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+    #         for _ in executor.map(self.OF_filter_along_Z_chunk,
+    #                             chunk_indexes,
+    #                             chunk_sizes,
+    #                             chunk_offsets,
+    #                             kernels):
+    #             logging.debug(f"PE #{_} has finished")
+    #     remainding_slices = Z_dim % self.max_number_of_processes
+    #     if remainding_slices > 0:
+    #         chunk_indexes = [i for i in range(remainding_slices)]
+    #         chunk_sizes = [1]*remainding_slices
+    #         chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
+    #         kernels = [kernel]*remainding_slices
+    #         with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
+    #             for _ in executor.map(self.OF_filter_along_Z_chunk,
+    #                                 chunk_indexes,
+    #                                 chunk_sizes,
+    #                                 chunk_offsets,
+    #                                 kernels):
+    #                 logging.debug(f"PU #{_} finished")
+    #     if __debug__:
+    #         time_1 = time.perf_counter()
+    #         logging.debug(f"Filtering along Z spent {time_1 - time_0} seconds")
+    #         logging.debug(f"Min OF val: {min_OF}")
+    #         logging.debug(f"Max OF val: {max_OF}")
+
+    # def OF_filter_along_Y(self,kernel, l, w):
+    #     data_vol=self._data_vol
+    #     #global __percent__
+    #     logging.info(f"Filtering along Y with l={l}, w={w}, and kernel length={kernel.size}")
+    #     if __debug__:
+    #         time_0 = time.perf_counter()
+    #         min_OF = 1000
+    #         max_OF = -1000
+
+    #     Y_dim = data_vol.shape[1]
+    #     chunk_size = Y_dim//self.max_number_of_processes
+    #     #for i in range(number_of_processes):
+    #     #    OF_filter_along_Y_chunk(i, padded_vol, kernel)
+    #     chunk_indexes = [i for i in range(self.max_number_of_processes)]
+    #     chunk_sizes = [chunk_size]*self.max_number_of_processes
+    #     chunk_offsets = [0]*self.max_number_of_processes
+    #     kernels = [kernel]*self.max_number_of_processes
+    #     with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+    #         for _ in executor.map(self.OF_filter_along_Y_chunk,
+    #                             chunk_indexes,
+    #                             chunk_sizes,
+    #                             chunk_offsets,
+    #                             kernels):
+    #             logging.debug(f"PE #{_} has finished")
+    #     remainding_slices = Y_dim % self.max_number_of_processes
+    #     if remainding_slices > 0:
+    #         chunk_indexes = [i for i in range(remainding_slices)]
+    #         chunk_sizes = [1]*remainding_slices
+    #         chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
+    #         kernels = [kernel]*remainding_slices
+    #         with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
+    #             for _ in executor.map(self.OF_filter_along_Y_chunk,
+    #                                 chunk_indexes,
+    #                                 chunk_sizes,
+    #                                 chunk_offsets,
+    #                                 kernels):
+    #                 logging.debug(f"PU #{_} finished")
+
+    #     if __debug__:
+    #         time_1 = time.perf_counter()
+    #         logging.debug(f"Filtering along Y spent {time_1 - time_0} seconds")
+    #         logging.debug(f"Min OF val: {min_OF}")
+    #         logging.debug(f"Max OF val: {max_OF}")
+
+    # def OF_filter_along_X(self,kernel, l, w):
+    #     data_vol=self._data_vol
+    #     #global __percent__
+    #     logging.info(f"Filtering along X with l={l}, w={w}, and kernel length={kernel.size}")
+    #     if __debug__:
+    #         time_0 = time.perf_counter()
+    #         min_OF = 1000
+    #         max_OF = -1000
+
+    #     X_dim = data_vol.shape[2]
+    #     chunk_size = X_dim//self.max_number_of_processes
+    #     #for i in range(number_of_processes):
+    #     #    OF_filter_along_X_chunk(i, padded_vol, kernel)
+    #     chunk_indexes = [i for i in range(self.max_number_of_processes)]
+    #     chunk_sizes = [chunk_size]*self.max_number_of_processes
+    #     chunk_offsets = [0]*self.max_number_of_processes
+    #     kernels = [kernel]*self.max_number_of_processes
+    #     with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+    #         for _ in executor.map(self.OF_filter_along_X_chunk,
+    #                             chunk_indexes,
+    #                             chunk_sizes,
+    #                             chunk_offsets,
+    #                             kernels):
+    #             logging.debug(f"PE #{_} has finished")
+    #     remainding_slices = X_dim % self.max_number_of_processes
+    #     if remainding_slices > 0:
+    #         chunk_indexes = [i for i in range(remainding_slices)]
+    #         chunk_sizes = [1]*remainding_slices
+    #         chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
+    #         kernels = [kernel]*remainding_slices
+    #         with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
+    #             for _ in executor.map(self.OF_filter_along_X_chunk,
+    #                                 chunk_indexes,
+    #                                 chunk_sizes,
+    #                                 chunk_offsets,
+    #                                 kernels):
+    #                 logging.debug(f"PU #{_} finished")
+
+    #     if __debug__:
+    #         time_1 = time.perf_counter()
+    #         logging.debug(f"Filtering along X spent {time_1 - time_0} seconds")
+
+    def do_filter(self,kernels, l, w, use_OF=True):
+        #TODO: Create a single function that filters along axis specified
+        data_vol=self._data_vol
+        # self.OF_filter_along_Z(kernels[0], l, w)
+        self.filter_along_axis(kernels[0], l, w, axis_i=1, use_OF=use_OF)
+        data_vol[...] = self._filtered_vol[...]
+        #self.OF_filter_along_Y(kernels[1], l, w)
+        self.filter_along_axis(kernels[0], l, w, axis_i=2, use_OF=use_OF)
+        data_vol[...] = self._filtered_vol[...]
+        #self.OF_filter_along_X(kernels[2], l, w)
+        self.filter_along_axis(kernels[0], l, w, axis_i=3, use_OF=use_OF)
+
+
+    def filter_along_axis_slice(self,data_vol0,filtered_vol0,islice, kernel, axis_i, use_OF):
+
+        #TODO: Test support of different axis
+
+        #TODO: Support for non-OF compensation
+
+        assert kernel.size % 2 != 0 # kernel.size must be odd
+
+        ks2 = kernel.size//2
+
+        if axis_i==0:
+            data_vol_transp=data_vol0
+        elif axis_i==1:
+            data_vol_transp=np.transpose(data_vol0,axis=(1,2,0))
+        elif axis_i==2:
+            data_vol_transp=np.transpose(data_vol0,axis=(2,0,1))
+                            
+        tmp_slice = np.zeros_like(data_vol_transp[islice, :, :]).astype(np.float32)
+
+        if use_OF:
+            prev_flow = np.zeros(shape=(data_vol_transp.shape[1], data_vol_transp.shape[2], 2), dtype=np.float32)
+
+            for i in range(ks2 - 1, -1, -1):
+                flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
+                                data_vol_transp[islice, :, :], self.levels, self.winsize, prev_flow)
+                prev_flow = flow
+                OF_compensated_slice = self.warp_slice(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :], flow)
+                tmp_slice += OF_compensated_slice * kernel[i]
+            tmp_slice += data_vol_transp[islice, :, :] * kernel[ks2]
+            prev_flow = np.zeros(shape=(data_vol_transp.shape[1], data_vol_transp.shape[2], 2), dtype=np.float32)
+            for i in range(ks2 + 1, kernel.size):
+                flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
+                                data_vol_transp[islice, :, :], self.levels, self.winsize, prev_flow)
+                prev_flow = flow
+                OF_compensated_slice = self.warp_slice(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :], flow)
+                tmp_slice += OF_compensated_slice * kernel[i]
+        else:
+            #No OF
+            for i in range(kernel.size):
+                #Simple 1D convolution
+                tmp_slice += data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :]*kernel[i]
+
+        if axis_i==0:
+            filtered_vol0[islice, :, :] = tmp_slice
+        elif axis_i==1:
+            filtered_vol0[:, islice, :] = tmp_slice
+        elif axis_i==2:
+            filtered_vol0[:, :, islice] = tmp_slice
+
+        # self.filtered_vol0[islice, :, :] = tmp_slice
+        self.__percent__.value += 1
+
+    def filter_along_axis_chunk_worker(self,data_shape, data_dtype, chunk_index, chunk_size, chunk_offset, kernel, axis_i, use_OF):
+        #Collect shared memory data ref and output
+
+        #Collect exisiting shared memories of data_vol and filtered_vol
+        data_vol_sm = shared_memory.SharedMemory(name='data_vol_sm')
+        data_vol0 = np.ndarray(data_shape, dtype=data_dtype, buffer=data_vol_sm.buf)
+
+        filtered_vol_sm= shared_memory.SharedMemory(name='filtered_vol_sm')
+        filtered_vol0 = np.ndarray(data_shape, dtype=data_dtype, buffer=filtered_vol_sm.buf)
+
+        for i in range(chunk_size):
+            self.filter_along_axis_slice(data_vol0,filtered_vol0, chunk_index*chunk_size + i + chunk_offset, kernel, axis_i, use_OF)
+
+        data_vol_sm.close()
+        filtered_vol_sm.close()
+
+        return chunk_index
+
+
+    def filter_along_axis(self, kernel, l, w, axis_i, use_OF=True, bSequential=False):
+        if not(axis_i==0 or axis_i==0 or axis_i==0):
+            raise ValueError(f"Axis {axis_i} not valid")
+        
+        #global __percent__
+        logging.info(f"Filtering along axis {axis_i} with l={l}, w={w}, and kernel length={kernel.size}")
 
         if __debug__:
             time_0 = time.perf_counter()
             min_OF = 1000
             max_OF = -1000
 
-        Z_dim = data_vol.shape[0]
-        chunk_size = Z_dim//self.max_number_of_processes
-        #for i in range(number_of_processes):
-        #    OF_filter_along_Z_chunk(i, padded_vol, kernel)
-        chunk_indexes = [i for i in range(self.max_number_of_processes)]
-        chunk_sizes = [chunk_size]*self.max_number_of_processes
-        chunk_offsets = [0]*self.max_number_of_processes
-        kernels = [kernel]*self.max_number_of_processes
-        with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
-            for _ in executor.map(self.OF_filter_along_Z_chunk,
-                                chunk_indexes,
-                                chunk_sizes,
-                                chunk_offsets,
-                                kernels):
-                logging.debug(f"PE #{_} has finished")
-        remainding_slices = Z_dim % self.max_number_of_processes
-        if remainding_slices > 0:
-            chunk_indexes = [i for i in range(remainding_slices)]
-            chunk_sizes = [1]*remainding_slices
-            chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
-            kernels = [kernel]*remainding_slices
-            with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
-                for _ in executor.map(self.OF_filter_along_Z_chunk,
+        if not bSequential:
+            #Use the parallel processing algorithm
+
+            #Don't need to create shared memories as
+            # self._data_vol and self._filtered_vol are already shared
+            # with names "data_vol_sm" and "filtered_vol_sm"
+
+            axis_dim = data_vol.shape[axis_i]
+            chunk_size = axis_dim//self.max_number_of_processes
+
+            chunk_indexes = [i for i in range(self.max_number_of_processes)]
+            chunk_sizes = [chunk_size]*self.max_number_of_processes
+            chunk_offsets = [0]*self.max_number_of_processes
+            kernels = [kernel]*self.max_number_of_processes
+            axis_i_s = [axis_i]*self.max_number_of_processes
+
+            use_OFs = [use_OF]*self.max_number_of_processes
+            with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+                for _ in executor.map(self.filter_along_axis_chunk_worker,
                                     chunk_indexes,
                                     chunk_sizes,
                                     chunk_offsets,
-                                    kernels):
-                    logging.debug(f"PU #{_} finished")
+                                    kernels,
+                                    axis_i_s,
+                                    use_OFs):
+                    logging.debug(f"PE #{_} has finished")
+            remaining_slices = axis_dim % self.max_number_of_processes
+            if remaining_slices > 0:
+                chunk_indexes = [i for i in range(remaining_slices)]
+                chunk_sizes = [1]*remaining_slices
+                chunk_offsets = [chunk_size*self.max_number_of_processes]*remaining_slices
+                kernels = [kernel]*remaining_slices
+                with ProcessPoolExecutor(max_workers=remaining_slices) as executor:
+                    for _ in executor.map(self.filter_along_axis_chunk_worker,
+                                        chunk_indexes,
+                                        chunk_sizes,
+                                        chunk_offsets,
+                                        kernels): #TODO: add appropriate arguments
+                        logging.debug(f"PU #{_} finished")
+        else:
+            #Sequential
+            #TODO : chceck code in flowdenoising_sequential
+            pass
+
         if __debug__:
             time_1 = time.perf_counter()
             logging.debug(f"Filtering along Z spent {time_1 - time_0} seconds")
             logging.debug(f"Min OF val: {min_OF}")
             logging.debug(f"Max OF val: {max_OF}")
 
-    def OF_filter_along_Y(self,kernel, l, w):
-        data_vol=self.data_vol
-        global __percent__
-        logging.info(f"Filtering along Y with l={l}, w={w}, and kernel length={kernel.size}")
-        if __debug__:
-            time_0 = time.perf_counter()
-            min_OF = 1000
-            max_OF = -1000
+    # def no_OF_filter_along_Z_slice(self,z, kernel):
+    #     data_vol=self._data_vol
+    #     ks2 = kernel.size//2
+    #     tmp_slice = np.zeros(shape=(data_vol.shape[1], data_vol.shape[2]), dtype=np.float32)
+    #     for i in range(kernel.size):
+    #         tmp_slice += data_vol[(z + i - ks2) % data_vol.shape[0], :, :]*kernel[i]
+    #     self._filtered_vol[z, :, :] = tmp_slice
+    #     self.__percent__.value += 1
 
-        Y_dim = data_vol.shape[1]
-        chunk_size = Y_dim//self.max_number_of_processes
-        #for i in range(number_of_processes):
-        #    OF_filter_along_Y_chunk(i, padded_vol, kernel)
-        chunk_indexes = [i for i in range(self.max_number_of_processes)]
-        chunk_sizes = [chunk_size]*self.max_number_of_processes
-        chunk_offsets = [0]*self.max_number_of_processes
-        kernels = [kernel]*self.max_number_of_processes
-        with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
-            for _ in executor.map(self.OF_filter_along_Y_chunk,
-                                chunk_indexes,
-                                chunk_sizes,
-                                chunk_offsets,
-                                kernels):
-                logging.debug(f"PE #{_} has finished")
-        remainding_slices = Y_dim % self.max_number_of_processes
-        if remainding_slices > 0:
-            chunk_indexes = [i for i in range(remainding_slices)]
-            chunk_sizes = [1]*remainding_slices
-            chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
-            kernels = [kernel]*remainding_slices
-            with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
-                for _ in executor.map(self.OF_filter_along_Y_chunk,
-                                    chunk_indexes,
-                                    chunk_sizes,
-                                    chunk_offsets,
-                                    kernels):
-                    logging.debug(f"PU #{_} finished")
+    # def no_OF_filter_along_Y_slice(self,y, kernel):
+    #     data_vol=self._data_vol
+    #     ks2 = kernel.size//2
+    #     tmp_slice = np.zeros(shape=(data_vol.shape[0], data_vol.shape[2]), dtype=np.float32)
+    #     for i in range(kernel.size):
+    #         tmp_slice += data_vol[:, (y + i - ks2) % data_vol.shape[1], :]*kernel[i]
+    #     self._filtered_vol[:, y, :] = tmp_slice
+    #     self.__percent__.value += 1
 
-        if __debug__:
-            time_1 = time.perf_counter()
-            logging.debug(f"Filtering along Y spent {time_1 - time_0} seconds")
-            logging.debug(f"Min OF val: {min_OF}")
-            logging.debug(f"Max OF val: {max_OF}")
+    # def no_OF_filter_along_X_slice(self,x, kernel):
+    #     data_vol=self._data_vol
+    #     ks2 = kernel.size//2
+    #     tmp_slice = np.zeros(shape=(data_vol.shape[0], data_vol.shape[1]), dtype=np.float32)
+    #     for i in range(kernel.size):
+    #         tmp_slice += data_vol[:, :, (x + i - ks2) % data_vol.shape[2]]*kernel[i]
+    #     self._filtered_vol[:, :, x] = tmp_slice
+    #     self.__percent__.value += 1
 
-    def OF_filter_along_X(self,kernel, l, w):
-        data_vol=self.data_vol
-        global __percent__
-        logging.info(f"Filtering along X with l={l}, w={w}, and kernel length={kernel.size}")
-        if __debug__:
-            time_0 = time.perf_counter()
-            min_OF = 1000
-            max_OF = -1000
+    # def no_OF_filter_along_Z_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
+    #     for z in range(chunk_size):
+    #         self.no_OF_filter_along_Z_slice(chunk_index*chunk_size + z + chunk_offset, kernel)
+    #     return chunk_index
 
-        X_dim = data_vol.shape[2]
-        chunk_size = X_dim//self.max_number_of_processes
-        #for i in range(number_of_processes):
-        #    OF_filter_along_X_chunk(i, padded_vol, kernel)
-        chunk_indexes = [i for i in range(self.max_number_of_processes)]
-        chunk_sizes = [chunk_size]*self.max_number_of_processes
-        chunk_offsets = [0]*self.max_number_of_processes
-        kernels = [kernel]*self.max_number_of_processes
-        with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
-            for _ in executor.map(self.OF_filter_along_X_chunk,
-                                chunk_indexes,
-                                chunk_sizes,
-                                chunk_offsets,
-                                kernels):
-                logging.debug(f"PE #{_} has finished")
-        remainding_slices = X_dim % self.max_number_of_processes
-        if remainding_slices > 0:
-            chunk_indexes = [i for i in range(remainding_slices)]
-            chunk_sizes = [1]*remainding_slices
-            chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
-            kernels = [kernel]*remainding_slices
-            with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
-                for _ in executor.map(self.OF_filter_along_X_chunk,
-                                    chunk_indexes,
-                                    chunk_sizes,
-                                    chunk_offsets,
-                                    kernels):
-                    logging.debug(f"PU #{_} finished")
+    # def no_OF_filter_along_Y_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
+    #     for y in range(chunk_size):
+    #         self.no_OF_filter_along_Y_slice(chunk_index*chunk_size + y + chunk_offset, kernel)
+    #     return chunk_index
 
-        if __debug__:
-            time_1 = time.perf_counter()
-            logging.debug(f"Filtering along X spent {time_1 - time_0} seconds")
+    # def no_OF_filter_along_X_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
+    #     for x in range(chunk_size):
+    #         self.no_OF_filter_along_X_slice(chunk_index*chunk_size + x + chunk_offset, kernel)
+    #     return chunk_index
 
-    def OF_filter(self,kernels, l, w):
-        data_vol=self.data_vol
-        self.OF_filter_along_Z(kernels[0], l, w)
-        data_vol[...] = self._filtered_vol[...]
-        self.OF_filter_along_Y(kernels[1], l, w)
-        data_vol[...] = self._filtered_vol[...]
-        self.OF_filter_along_X(kernels[2], l, w)
+    # def no_OF_filter_along_Z(self,kernel):
+    #     data_vol=self._data_vol
+    #     logging.info(f"Filtering along Z with kernel length={kernel.size}")
 
-    def no_OF_filter_along_Z_slice(self,z, kernel):
-        data_vol=self.data_vol
-        ks2 = kernel.size//2
-        tmp_slice = np.zeros(shape=(data_vol.shape[1], data_vol.shape[2]), dtype=np.float32)
-        for i in range(kernel.size):
-            tmp_slice += data_vol[(z + i - ks2) % data_vol.shape[0], :, :]*kernel[i]
-        self._filtered_vol[z, :, :] = tmp_slice
-        __percent__.value += 1
+    #     if __debug__:
+    #         time_0 = time.perf_counter()
 
-    def no_OF_filter_along_Y_slice(self,y, kernel):
-        data_vol=self.data_vol
-        ks2 = kernel.size//2
-        tmp_slice = np.zeros(shape=(data_vol.shape[0], data_vol.shape[2]), dtype=np.float32)
-        for i in range(kernel.size):
-            tmp_slice += data_vol[:, (y + i - ks2) % data_vol.shape[1], :]*kernel[i]
-        self._filtered_vol[:, y, :] = tmp_slice
-        __percent__.value += 1
+    #     Z_dim = data_vol.shape[0]
+    #     chunk_size = Z_dim//self.max_number_of_processes
+    #     #for i in range(number_of_processes):
+    #     #    no_OF_filter_along_Z_chunk(i, kernel)
+    #     chunk_indexes = [i for i in range(self.max_number_of_processes)]
+    #     chunk_sizes = [chunk_size]*self.max_number_of_processes
+    #     chunk_offsets = [0]*self.max_number_of_processes
+    #     kernels = [kernel]*self.max_number_of_processes
+    #     with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+    #         for _ in executor.map(self.no_OF_filter_along_Z_chunk,
+    #                             chunk_indexes,
+    #                             chunk_sizes,
+    #                             chunk_offsets,
+    #                             kernels):
+    #             logging.debug(f"PU #{_} finished")
+    #     remainding_slices = Z_dim % self.max_number_of_processes
+    #     if remainding_slices > 0:
+    #         chunk_indexes = [i for i in range(remainding_slices)]
+    #         chunk_sizes = [1]*remainding_slices
+    #         chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
+    #         kernels = [kernel]*remainding_slices
+    #         with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
+    #             for _ in executor.map(self.no_OF_filter_along_Z_chunk,
+    #                                 chunk_indexes,
+    #                                 chunk_sizes,
+    #                                 chunk_offsets,
+    #                                 kernels):
+    #                 logging.debug(f"PU #{_} finished")
 
-    def no_OF_filter_along_X_slice(self,x, kernel):
-        data_vol=self.data_vol
-        ks2 = kernel.size//2
-        tmp_slice = np.zeros(shape=(data_vol.shape[0], data_vol.shape[1]), dtype=np.float32)
-        for i in range(kernel.size):
-            tmp_slice += data_vol[:, :, (x + i - ks2) % data_vol.shape[2]]*kernel[i]
-        self._filtered_vol[:, :, x] = tmp_slice
-        __percent__.value += 1
+    #     if __debug__:
+    #         time_1 = time.perf_counter()
+    #         logging.debug(f"Filtering along Z spent {time_1 - time_0} seconds")
 
-    def no_OF_filter_along_Z_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
-        for z in range(chunk_size):
-            self.no_OF_filter_along_Z_slice(chunk_index*chunk_size + z + chunk_offset, kernel)
-        return chunk_index
+    # def no_OF_filter_along_Y(self,kernel):
+    #     data_vol=self._data_vol
+    #     logging.info(f"Filtering along Y with kernel length={kernel.size}")
 
-    def no_OF_filter_along_Y_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
-        for y in range(chunk_size):
-            self.no_OF_filter_along_Y_slice(chunk_index*chunk_size + y + chunk_offset, kernel)
-        return chunk_index
+    #     if __debug__:
+    #         time_0 = time.perf_counter()
 
-    def no_OF_filter_along_X_chunk(self,chunk_index, chunk_size, chunk_offset, kernel):
-        for x in range(chunk_size):
-            self.no_OF_filter_along_X_slice(chunk_index*chunk_size + x + chunk_offset, kernel)
-        return chunk_index
+    #     Y_dim = data_vol.shape[1]
+    #     chunk_size = Y_dim//self.max_number_of_processes
+    #     #for i in range(number_of_processes):
+    #     #    no_OF_filter_along_Y_chunk(i, kernel)
+    #     chunk_indexes = [i for i in range(self.max_number_of_processes)]
+    #     chunk_sizes = [chunk_size]*self.max_number_of_processes
+    #     chunk_offsets = [0]*self.max_number_of_processes
+    #     kernels = [kernel]*self.max_number_of_processes
+    #     with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+    #         for _ in executor.map(self.no_OF_filter_along_Y_chunk,
+    #                             chunk_indexes,
+    #                             chunk_sizes,
+    #                             chunk_offsets,
+    #                             kernels):
+    #             logging.debug(f"PU #{_} finished")
+    #     remainding_slices = Y_dim % self.max_number_of_processes
+    #     if remainding_slices > 0:
+    #         chunk_indexes = [i for i in range(remainding_slices)]
+    #         chunk_sizes = [1]*remainding_slices
+    #         chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
+    #         kernels = [kernel]*remainding_slices
+    #         with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
+    #             for _ in executor.map(self.no_OF_filter_along_Y_chunk,
+    #                                 chunk_indexes,
+    #                                 chunk_sizes,
+    #                                 chunk_offsets,
+    #                                 kernels):
+    #                 logging.debug(f"PU #{_} finished")
 
-    def no_OF_filter_along_Z(self,kernel):
-        data_vol=self.data_vol
-        logging.info(f"Filtering along Z with kernel length={kernel.size}")
+    #     if __debug__:
+    #         time_1 = time.perf_counter()
+    #         logging.debug(f"Filtering along Y spent {time_1 - time_0} seconds")
 
-        if __debug__:
-            time_0 = time.perf_counter()
+    # def no_OF_filter_along_X(self,kernel):
+    #     data_vol=self._data_vol
+    #     logging.info(f"Filtering along X with kernel length={kernel.size}")
+    #     if __debug__:
+    #         time_0 = time.perf_counter()
 
-        Z_dim = data_vol.shape[0]
-        chunk_size = Z_dim//self.max_number_of_processes
-        #for i in range(number_of_processes):
-        #    no_OF_filter_along_Z_chunk(i, kernel)
-        chunk_indexes = [i for i in range(self.max_number_of_processes)]
-        chunk_sizes = [chunk_size]*self.max_number_of_processes
-        chunk_offsets = [0]*self.max_number_of_processes
-        kernels = [kernel]*self.max_number_of_processes
-        with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
-            for _ in executor.map(self.no_OF_filter_along_Z_chunk,
-                                chunk_indexes,
-                                chunk_sizes,
-                                chunk_offsets,
-                                kernels):
-                logging.debug(f"PU #{_} finished")
-        remainding_slices = Z_dim % self.max_number_of_processes
-        if remainding_slices > 0:
-            chunk_indexes = [i for i in range(remainding_slices)]
-            chunk_sizes = [1]*remainding_slices
-            chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
-            kernels = [kernel]*remainding_slices
-            with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
-                for _ in executor.map(self.no_OF_filter_along_Z_chunk,
-                                    chunk_indexes,
-                                    chunk_sizes,
-                                    chunk_offsets,
-                                    kernels):
-                    logging.debug(f"PU #{_} finished")
+    #     X_dim = data_vol.shape[2]
+    #     chunk_size = X_dim//self.max_number_of_processes
+    #     #for i in range(number_of_processes):
+    #     #    no_OF_filter_along_X_chunk(i, kernel)
+    #     chunk_indexes = [i for i in range(self.max_number_of_processes)]
+    #     chunk_sizes = [chunk_size]*self.max_number_of_processes
+    #     chunk_offsets = [0]*self.max_number_of_processes
+    #     kernels = [kernel]*self.max_number_of_processes
+    #     with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+    #         for _ in executor.map(self.no_OF_filter_along_X_chunk,
+    #                             chunk_indexes,
+    #                             chunk_sizes,
+    #                             chunk_offsets,
+    #                             kernels):
+    #             logging.debug(f"PU #{_} finished")
+    #     remainding_slices = X_dim % self.max_number_of_processes
+    #     if remainding_slices > 0:
+    #         chunk_indexes = [i for i in range(remainding_slices)]
+    #         chunk_sizes = [1]*remainding_slices
+    #         chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
+    #         kernels = [kernel]*remainding_slices
+    #         with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
+    #             for _ in executor.map(self.no_OF_filter_along_X_chunk,
+    #                                 chunk_indexes,
+    #                                 chunk_sizes,
+    #                                 chunk_offsets,
+    #                                 kernels):
+    #                 logging.debug(f"PU #{_} finished")
 
-        if __debug__:
-            time_1 = time.perf_counter()
-            logging.debug(f"Filtering along Z spent {time_1 - time_0} seconds")
+    #     if __debug__:
+    #         time_1 = time.perf_counter()
+    #         logging.debug(f"Filtering along X spent {time_1 - time_0} seconds")
 
-    def no_OF_filter_along_Y(self,kernel):
-        data_vol=self.data_vol
-        logging.info(f"Filtering along Y with kernel length={kernel.size}")
-
-        if __debug__:
-            time_0 = time.perf_counter()
-
-        Y_dim = data_vol.shape[1]
-        chunk_size = Y_dim//self.max_number_of_processes
-        #for i in range(number_of_processes):
-        #    no_OF_filter_along_Y_chunk(i, kernel)
-        chunk_indexes = [i for i in range(self.max_number_of_processes)]
-        chunk_sizes = [chunk_size]*self.max_number_of_processes
-        chunk_offsets = [0]*self.max_number_of_processes
-        kernels = [kernel]*self.max_number_of_processes
-        with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
-            for _ in executor.map(self.no_OF_filter_along_Y_chunk,
-                                chunk_indexes,
-                                chunk_sizes,
-                                chunk_offsets,
-                                kernels):
-                logging.debug(f"PU #{_} finished")
-        remainding_slices = Y_dim % self.max_number_of_processes
-        if remainding_slices > 0:
-            chunk_indexes = [i for i in range(remainding_slices)]
-            chunk_sizes = [1]*remainding_slices
-            chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
-            kernels = [kernel]*remainding_slices
-            with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
-                for _ in executor.map(self.no_OF_filter_along_Y_chunk,
-                                    chunk_indexes,
-                                    chunk_sizes,
-                                    chunk_offsets,
-                                    kernels):
-                    logging.debug(f"PU #{_} finished")
-
-        if __debug__:
-            time_1 = time.perf_counter()
-            logging.debug(f"Filtering along Y spent {time_1 - time_0} seconds")
-
-    def no_OF_filter_along_X(self,kernel):
-        data_vol=self.data_vol
-        logging.info(f"Filtering along X with kernel length={kernel.size}")
-        if __debug__:
-            time_0 = time.perf_counter()
-
-        X_dim = data_vol.shape[2]
-        chunk_size = X_dim//self.max_number_of_processes
-        #for i in range(number_of_processes):
-        #    no_OF_filter_along_X_chunk(i, kernel)
-        chunk_indexes = [i for i in range(self.max_number_of_processes)]
-        chunk_sizes = [chunk_size]*self.max_number_of_processes
-        chunk_offsets = [0]*self.max_number_of_processes
-        kernels = [kernel]*self.max_number_of_processes
-        with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
-            for _ in executor.map(self.no_OF_filter_along_X_chunk,
-                                chunk_indexes,
-                                chunk_sizes,
-                                chunk_offsets,
-                                kernels):
-                logging.debug(f"PU #{_} finished")
-        remainding_slices = X_dim % self.max_number_of_processes
-        if remainding_slices > 0:
-            chunk_indexes = [i for i in range(remainding_slices)]
-            chunk_sizes = [1]*remainding_slices
-            chunk_offsets = [chunk_size*self.max_number_of_processes]*remainding_slices
-            kernels = [kernel]*remainding_slices
-            with ProcessPoolExecutor(max_workers=remainding_slices) as executor:
-                for _ in executor.map(self.no_OF_filter_along_X_chunk,
-                                    chunk_indexes,
-                                    chunk_sizes,
-                                    chunk_offsets,
-                                    kernels):
-                    logging.debug(f"PU #{_} finished")
-
-        if __debug__:
-            time_1 = time.perf_counter()
-            logging.debug(f"Filtering along X spent {time_1 - time_0} seconds")
-
-    def no_OF_filter(self,kernels):
-        data_vol=self.data_vol
-        self.no_OF_filter_along_Z(kernels[0])
-        data_vol[...] = self._filtered_vol[...]
-        self.no_OF_filter_along_Y(kernels[1])
-        data_vol[...] = self._filtered_vol[...]
-        self.no_OF_filter_along_X(kernels[2])
+    # def no_OF_filter(self,kernels):
+    #     #data_vol=self._data_vol
+    #     self.no_OF_filter_along_Z(kernels[0])
+    #     self._data_vol[...] = self._filtered_vol[...]
+    #     self.no_OF_filter_along_Y(kernels[1])
+    #     self._data_vol[...] = self._filtered_vol[...]
+    #     self.no_OF_filter_along_X(kernels[2])
 
     def feedback_periodic(self,stopEv: threading.Event):
         time_0 = time.perf_counter()
@@ -522,8 +672,8 @@ class cFlowDenoiser():
                 if (current_time - time_0) > (60 * self.timeout_mins):
                     pass
                     #_thread.interrupt_main() #may not work inside a class                    raise Exception(f"Timeout reached {self.timeout_mins} mins elapsed. Terminating now.")
-            #logging.info(f"{100*__percent__.value/np.sum(data_vol.shape):3.2f} % completed")
-            logging.info(f"{__percent__.value} completed")
+            #logging.info(f"{100*self.__percent__.value/np.sum(data_vol.shape):3.2f} % completed")
+            logging.info(f"{self.__percent__.value} completed")
             time.sleep(1)
         logging.info("feedback_periodic thread stopped.")
 
@@ -534,20 +684,20 @@ class cFlowDenoiser():
         runs opticalFlow filter on the numpy volume provided
         """
 
-        vol_size = data_vol.dtype.itemsize * data_vol.size
+        vol_size_bytes = data_vol.dtype.itemsize * data_vol.size
         logging.info(f"shape of the input volume (Z, Y, X) = {data_vol.shape}")
         logging.info(f"type of the volume = {data_vol.dtype}")
-        logging.info(f"vol requires {vol_size/(1024*1024):.1f} MB")
+        logging.info(f"vol requires {vol_size_bytes/(1024*1024):.1f} MB")
         logging.info(f"data max = {data_vol.max()}")
         logging.info(f"data min = {data_vol.min()}")
         vol_mean = data_vol.mean()
         logging.info(f"Input vol average = {vol_mean}")
 
         if self.bComputeFlowWithPreviousFlow:
-            get_flow = self.get_flow_without_prev_flow
-            logging.info("No reusing adjacent OF fields as predictions")
+            self.get_flow = self.get_flow_without_prev_flow
+            logging.info("Not reusing adjacent OF fields as predictions")
         else:
-            get_flow = self.get_flow_with_prev_flow
+            self.get_flow = self.get_flow_with_prev_flow
             logging.info("Using adjacent OF fields as predictions")
 
         sigma=self.sigma
@@ -560,8 +710,6 @@ class cFlowDenoiser():
         logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
 
         # Copy the volume to shared memory
-        randint0 = random.randint(0,999999) #Randomize the shared memory name
-
         SM_vol=None
         SM_filtered_vol=None
 
@@ -570,8 +718,8 @@ class cFlowDenoiser():
             try:
                 SM_vol = shared_memory.SharedMemory(
                     create=True,
-                    size=vol_size,
-                    name="vol"+str(randint0)) # See /dev/shm/
+                    size=vol_size_bytes,
+                    name="data_vol_sm" )
             except Exception as sm_vol_e:
                 raise MemoryError("Error creating shared memory SM_vol: {sm_vol_e}")
                 #sys.exit("Error creating shared memory SM_vol: {sm_vol_e}")
@@ -582,21 +730,25 @@ class cFlowDenoiser():
             #     buffer=SM_vol.buf)
             # _vol[...] = vol[...]
             # vol = _vol
-            self.data_vol = np.ndarray(
+            self._data_vol = np.ndarray(
                 shape=data_vol.shape,
                 dtype=data_vol.dtype,
                 buffer=SM_vol.buf)
+            
             try:
                 SM_filtered_vol = shared_memory.SharedMemory(
                     create=True,
-                    size=vol_size,
-                    name="filtered_vol"+str(randint0)) # See /dev/shm
+                    size=vol_size_bytes,
+                    name="filtered_vol_sm" )
             except Exception as sm_filtered_vol_e:
                 #logging.error(f"Error: {sm_filtered_vol_e}")
                 SM_vol.close()
                 SM_vol.unlink()
                 raise MemoryError("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
                 #sys.exit("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
+            
+            #Copy data
+            self._data_vol[...] = data_vol[...]
 
             #_filtered_vol is a global variable
             #Consider putting this in a class
@@ -619,10 +771,13 @@ class cFlowDenoiser():
                 logging.info(f"Filtering ...")
                 time_0 = time.perf_counter()
             #Starts filtering
-            if self.disable_OF_compensation:
-                self.no_OF_filter(kernels) #Filters without optical flow
-            else:
-                self.OF_filter(kernels, self.OF_LEVELS, self.OF_WINDOW_SIZE) #Filters with optical flow
+            # if self.disable_OF_compensation:
+            #     self.no_OF_filter(kernels) #Filters without optical flow
+            # else:
+            #     self.OF_filter(kernels, self.OF_LEVELS, self.OF_WINDOW_SIZE) #Filters with optical flow
+
+            self.do_filter(kernels, self.OF_LEVELS, self.OF_WINDOW_SIZE, use_OF=True)
+
 
             #When filtering is complete it continues here
             #stop feedback_thread.
