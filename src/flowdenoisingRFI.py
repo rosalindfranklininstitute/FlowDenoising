@@ -40,14 +40,14 @@ import sys
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
-__fdn_progress_sm_value__ = Value('f', 0)
+# __fdn_progress_sm_value__ = Value('f', 0)
 
 FDN_LIZZIE="Is great"
 
 class cFlowDenoiser():
     OFCA_EXTENSION_MODE = cv2.BORDER_REPLICATE
-    #OF_LEVELS = 3
-    #OF_WINDOW_SIZE = 5
+    OF_LEVELS = 3
+    OF_WINDOW_SIZE = 5
     OF_ITERS = 3
     OF_POLY_N = 5
     OF_POLY_SIGMA = 1.2
@@ -61,8 +61,8 @@ class cFlowDenoiser():
 
     def __init__(self, *,
         sigma=(2.0,2.0,2.0),
-        levels=3,
-        winsize=5,
+        levels=3 ,
+        winsize=5 ,
         disable_OF_compensation=True,
         enable_mem_map = True,
         max_number_of_processes=None,
@@ -71,10 +71,12 @@ class cFlowDenoiser():
         use_OF=True
         ):
 
+        print(f"levels:{levels}")
+        print(f"winsize:{winsize}")
         self.SIGMA= sigma
-        self.OF_LEVELS= levels,
-        self.OF_WINDOW_SIZE= winsize,
-        self.disable_OF_compensation=disable_OF_compensation,
+        self.OF_LEVELS= levels
+        self.OF_WINDOW_SIZE= winsize
+        self.disable_OF_compensation=disable_OF_compensation
         self.enable_mem_map= enable_mem_map
         
         number_of_PUs = multiprocessing.cpu_count()
@@ -95,6 +97,7 @@ class cFlowDenoiser():
         self.calculation_interrupt=False
 
         self.sm_name_suffix = str(random.randint(1000,9999))
+        self.stopEv=threading.Event()
 
 
     @staticmethod
@@ -132,7 +135,7 @@ class cFlowDenoiser():
             flags0 = 0
             flow0 = None    
 
-        flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=flow0, pyr_scale=0.5, levels=self.OF_LEVELS, winsize=self.OF_WINDOW_SIZE, iterations=self.OF_ITERS, poly_n=self.OF_POLY_N, poly_sigma=self.OF_POLY_SIGMA, flags=flags0)
+        flow = cv2.calcOpticalFlowFarneback(prev=target, next=reference, flow=flow0, pyr_scale=0.5, levels=int(self.OF_LEVELS), winsize=int(self.OF_WINDOW_SIZE), iterations=int(self.OF_ITERS), poly_n=self.OF_POLY_N, poly_sigma=self.OF_POLY_SIGMA, flags=flags0)
 
         if __debug__:
             time_1 = time.perf_counter()
@@ -145,41 +148,45 @@ class cFlowDenoiser():
 
         self.__percent__=0
 
-        #feddback_thread = threading.Thread(target=feedback_periodic)
-        stopEv=threading.Event()
-        feddback_thread = threading.Thread(target=self.feedback_periodic, args=(stopEv,))
+        self.calculation_interrupt=False
+        self.stopEv.clear()
+        feddback_thread = threading.Thread(target=self.feedback_periodic, args=(self.stopEv,))
         feddback_thread.daemon = True # To obey CTRL+C interruption.
         #This also means that the thread is killed when the program exits
         feddback_thread.start()
 
+        logging.info("Filtering along Z")
         self.filter_along_axis(kernels[0],  axis_i=0)
         self._data_vol[...] = self._filtered_vol[...]
 
+        logging.info("Filtering along Y")
         self.filter_along_axis(kernels[0], axis_i=1)
         self._data_vol[...] = self._filtered_vol[...]
 
+        logging.info("Filtering along X")
         self.filter_along_axis(kernels[0], axis_i=2)
         self._data_vol[...] = self._filtered_vol[...]
 
         #When filtering is complete it continues here
         #stop feedback_thread.
         # There no stop() function to do that, so Event() is used
-        stopEv.set()
+        self.stopEv.set()
 
-    def filter_along_axis_slice(self,data_vol0,filtered_vol0,islice, kernel, axis_i):
-
+    def filter_along_axis_slice(self,data_vol0,filtered_vol0, islice, kernel, axis_i):
+        logging.debug(f"filter_along_axis_slice() with islice:{islice},  axis_i:{axis_i}")
         #TODO: Test support of different axis
 
         assert kernel.size % 2 != 0 # kernel.size must be odd
 
         ks2 = kernel.size//2
 
+        #logging.info("Transposing if needed")
         if axis_i==0:
             data_vol_transp=data_vol0
         elif axis_i==1:
-            data_vol_transp=np.transpose(data_vol0,axis=(1,2,0))
+            data_vol_transp=np.transpose(data_vol0,axes=(1,0,2))
         elif axis_i==2:
-            data_vol_transp=np.transpose(data_vol0,axis=(2,0,1))
+            data_vol_transp=np.transpose(data_vol0,axes=(2,0,1))
                             
         tmp_slice = np.zeros_like(data_vol_transp[islice, :, :]).astype(np.float32)
 
@@ -189,7 +196,7 @@ class cFlowDenoiser():
             #Note that the mod (%) is used here to introduce circularity in picking adjacent slices
             for i in range(ks2 - 1, -1, -1):
                 flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
-                                data_vol_transp[islice, :, :], self.levels, self.winsize, prev_flow)
+                                data_vol_transp[islice, :, :], prev_flow)
                 #indices of reference slice go from islice+ks2-1-ks2 = islice-1
                 # decreasing to islice-ks2 (including)
 
@@ -201,7 +208,7 @@ class cFlowDenoiser():
             
             for i in range(ks2 + 1, kernel.size):
                 flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
-                                data_vol_transp[islice, :, :], self.levels, self.winsize, prev_flow)
+                                data_vol_transp[islice, :, :], prev_flow)
                 #indices of reference slice go from islice+ks2+1-ks2 = islice+1
                 #increasing to islice+kernel.size-1-ks2 (including)
                 prev_flow = flow
@@ -214,6 +221,8 @@ class cFlowDenoiser():
             for i in range(kernel.size):
                 tmp_slice += data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :]*kernel[i]
 
+
+        #logging.info("Restoring orienation")
         if axis_i==0:
             filtered_vol0[islice, :, :] = tmp_slice
         elif axis_i==1:
@@ -222,16 +231,18 @@ class cFlowDenoiser():
             filtered_vol0[:, :, islice] = tmp_slice
 
         # self.filtered_vol0[islice, :, :] = tmp_slice
-        self.__percent__.value += 1
+        self.__percent__ += 1
 
     def filter_along_axis_chunk_worker(self, chunk_index, chunk_size, chunk_offset, kernel, axis_i):
-
+        logging.info(f"filter_along_axis_chunk_worker() with chunk_index:{chunk_index}, chunk_size:{chunk_size}, kernel:{kernel}, axis_i:{axis_i}")
         #Collect exisiting shared memories of data_vol and filtered_vol
-        data_vol_sm = shared_memory.SharedMemory(name='data_vol_sm')
-        data_vol0 = np.ndarray(self.data_shape, dtype=self.data_dtype, buffer=data_vol_sm.buf)
+        data_vol_sm = shared_memory.SharedMemory(name= "data_vol_"+ self.sm_name_suffix )
+        data_vol0 = np.ndarray(self.data_shape, dtype=self.data_type, buffer=data_vol_sm.buf)
 
-        filtered_vol_sm= shared_memory.SharedMemory(name='filtered_vol_sm')
-        filtered_vol0 = np.ndarray(self.data_shape, dtype=self.data_dtype, buffer=filtered_vol_sm.buf)
+        filtered_vol_sm= shared_memory.SharedMemory(name="filtered_vol_"+ self.sm_name_suffix )
+        filtered_vol0 = np.ndarray(self.data_shape, dtype=self.data_type, buffer=filtered_vol_sm.buf)
+
+        logging.info(f"Collected shared arrays")
 
         for i in range(chunk_size):
             #Work slice-by-slice
@@ -244,7 +255,7 @@ class cFlowDenoiser():
 
 
     def filter_along_axis(self, kernel, axis_i, bSequential=False):
-        if not(axis_i==0 or axis_i==0 or axis_i==0):
+        if not(axis_i==0 or axis_i==1 or axis_i==2):
             raise ValueError(f"Axis {axis_i} not valid")
         
         #global __percent__
@@ -270,16 +281,26 @@ class cFlowDenoiser():
             # with names "data_vol_sm" and "filtered_vol_sm"
 
             # TODO: Consider doing parallel processing with threads so that no __main__ requirement is needed
+            
+            axis_dim = self._data_vol.shape[axis_i]
 
-            axis_dim = data_vol.shape[axis_i]
-            chunk_size = axis_dim//self.max_number_of_processes
+            #chunk_size = axis_dim//self.max_number_of_processes
+            # last slices, leave last process for last processing
+            chunk_size = axis_dim//(self.max_number_of_processes)
+            n_remain_slices = axis_dim % (self.max_number_of_processes)
 
             #Arguments for the ProcessPoolExecutor
             chunk_indexes = [i for i in range(self.max_number_of_processes)]
-            chunk_sizes = [chunk_size]*self.max_number_of_processes
+            chunk_sizes = [chunk_size]*(self.max_number_of_processes)
             chunk_offsets = [0]*self.max_number_of_processes
             kernels = [kernel]*self.max_number_of_processes
             axis_i_s = [axis_i]*self.max_number_of_processes
+            if n_remain_slices>0:
+                chunk_indexes.append(self.max_number_of_processes)
+                chunk_size.append(n_remain_slices)
+                chunk_offsets.append(0)
+                kernels.append(kernel)
+                axis_i_s.append(axis_i)
 
             with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
                 
@@ -292,27 +313,28 @@ class cFlowDenoiser():
                                     axis_i_s,
                                     ):
                     logging.debug(f"PE #{_} has finished")
-            remaining_slices = axis_dim % self.max_number_of_processes
-            if remaining_slices > 0:
-                chunk_indexes = [i for i in range(remaining_slices)]
-                chunk_sizes = [1]*remaining_slices
-                chunk_offsets = [chunk_size*self.max_number_of_processes]*remaining_slices
-                kernels = [kernel]*remaining_slices
-                with ProcessPoolExecutor(max_workers=remaining_slices) as executor:
-                    for _ in executor.map(self.filter_along_axis_chunk_worker,
-                                        chunk_indexes,
-                                        chunk_sizes,
-                                        chunk_offsets,
-                                        kernels): #TODO: add appropriate arguments
-                        logging.debug(f"PU #{_} finished")
+            # remaining_slices = axis_dim % self.max_number_of_processes
+            # if remaining_slices > 0:
+            #     chunk_indexes = [i for i in range(remaining_slices)]
+            #     chunk_sizes = [1]*remaining_slices
+            #     chunk_offsets = [chunk_size*self.max_number_of_processes]*remaining_slices
+            #     kernels = [kernel]*remaining_slices
+            #     with ProcessPoolExecutor(max_workers=remaining_slices) as executor:
+            #         for _ in executor.map(self.filter_along_axis_chunk_worker,
+            #                             chunk_indexes,
+            #                             chunk_sizes,
+            #                             chunk_offsets,
+            #                             kernels): #TODO: add appropriate arguments
+            #             logging.debug(f"PU #{_} finished")
         else:
             #Sequential
-            axis_dim = data_vol.shape[axis_i]
+            print("Running sequentially")
+            axis_dim = self._data_vol.shape[axis_i]
             chunk_size = axis_dim
 
-            filtered_vol = self.filter_along_axis_chunk_worker(chunk_index=0, chunk_size=chunk_size, chunk_offset=0, 
+            self.filter_along_axis_chunk_worker(chunk_index=0, chunk_size=chunk_size, chunk_offset=0, 
                                                                  kernel=kernel, axis_i=axis_i)
-            return filtered_vol
+        
 
         if __debug__:
             time_1 = time.perf_counter()
@@ -324,14 +346,18 @@ class cFlowDenoiser():
     def feedback_periodic(self,stopEv: threading.Event):
         #Can use this thread to cancel calculation in case of keyboard interrrupt
         time_0 = time.perf_counter()
-        while not stopEv.is_set():
+        n_iterations = int(np.sum(np.array(self._data_vol.shape)))
+
+        print(f"self.calculation_interrupt:{self.calculation_interrupt}")
+        print(f"self.stopEv.is_set():{self.stopEv.is_set()}")
+        while not self.stopEv.is_set() or not self.calculation_interrupt:
             current_time = time.perf_counter()
             if self.timeout_mins > 0:
                 if (current_time - time_0) > (60 * self.timeout_mins):
                     pass
                     #_thread.interrupt_main() #may not work inside a class                    raise Exception(f"Timeout reached {self.timeout_mins} mins elapsed. Terminating now.")
             #logging.info(f"{100*self.__percent__.value/np.sum(data_vol.shape):3.2f} % completed")
-            logging.info(f"{self.__percent__.value} completed")
+            logging.info(f"{self.__percent__}/{n_iterations} completed")
             time.sleep(1)
         logging.info("feedback_periodic thread stopped.")
 
@@ -356,12 +382,12 @@ class cFlowDenoiser():
         self.vol_mean = data_vol.mean()
         logging.info(f"Input vol average = {self.vol_mean}")
 
-        if self.bComputeFlowWithPreviousFlow:
-            self.get_flow = self.get_flow_without_prev_flow
-            logging.info("Not reusing adjacent OF fields as predictions")
-        else:
-            self.get_flow = self.get_flow_with_prev_flow
-            logging.info("Using adjacent OF fields as predictions")
+        # if self.bComputeFlowWithPreviousFlow:
+        #     self.get_flow = self.get_flow_without_prev_flow
+        #     logging.info("Not reusing adjacent OF fields as predictions")
+        # else:
+        #     self.get_flow = self.get_flow_with_prev_flow
+        #     logging.info("Using adjacent OF fields as predictions")
 
         sigma=self.SIGMA
         logging.info(f"sigma={tuple(sigma)}")
@@ -438,6 +464,8 @@ class cFlowDenoiser():
         
         except Exception as e:
             logging.error(f"Some error occured: {str(e)}")
+            
+            
         
         finally:
             logging.info("Closing and unlinking shared memory")
@@ -445,6 +473,8 @@ class cFlowDenoiser():
             SM_vol.unlink()
             SM_filtered_vol.close()
             SM_filtered_vol.unlink()
+            self.calculation_interrupt=True
+            self.stopEv.set()
 
 
 
