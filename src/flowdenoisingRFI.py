@@ -44,6 +44,8 @@ LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
 FDN_LIZZIE="Is great"
 
+stopEv=threading.Event() #Global
+
 class cFlowDenoiser():
     OFCA_EXTENSION_MODE = cv2.BORDER_REPLICATE
     OF_LEVELS = 3
@@ -97,7 +99,7 @@ class cFlowDenoiser():
         self.calculation_interrupt=False
 
         self.sm_name_suffix = str(random.randint(1000,9999))
-        self.stopEv=threading.Event()
+        
 
 
     @staticmethod
@@ -149,8 +151,9 @@ class cFlowDenoiser():
         self.__percent__=0
 
         self.calculation_interrupt=False
-        self.stopEv.clear()
-        feddback_thread = threading.Thread(target=self.feedback_periodic, args=(self.stopEv,))
+ 
+        stopEv.clear()
+        feddback_thread = threading.Thread(target=self.feedback_periodic, args=(stopEv,))
         feddback_thread.daemon = True # To obey CTRL+C interruption.
         #This also means that the thread is killed when the program exits
         feddback_thread.start()
@@ -170,7 +173,7 @@ class cFlowDenoiser():
         #When filtering is complete it continues here
         #stop feedback_thread.
         # There no stop() function to do that, so Event() is used
-        self.stopEv.set()
+        stopEv.set()
 
     def filter_along_axis_slice(self,data_vol0,filtered_vol0, islice, kernel, axis_i):
         logging.debug(f"filter_along_axis_slice() with islice:{islice},  axis_i:{axis_i}")
@@ -297,7 +300,7 @@ class cFlowDenoiser():
             axis_i_s = [axis_i]*self.max_number_of_processes
             if n_remain_slices>0:
                 chunk_indexes.append(self.max_number_of_processes)
-                chunk_size.append(n_remain_slices)
+                chunk_sizes.append(n_remain_slices)
                 chunk_offsets.append(0)
                 kernels.append(kernel)
                 axis_i_s.append(axis_i)
@@ -313,19 +316,7 @@ class cFlowDenoiser():
                                     axis_i_s,
                                     ):
                     logging.debug(f"PE #{_} has finished")
-            # remaining_slices = axis_dim % self.max_number_of_processes
-            # if remaining_slices > 0:
-            #     chunk_indexes = [i for i in range(remaining_slices)]
-            #     chunk_sizes = [1]*remaining_slices
-            #     chunk_offsets = [chunk_size*self.max_number_of_processes]*remaining_slices
-            #     kernels = [kernel]*remaining_slices
-            #     with ProcessPoolExecutor(max_workers=remaining_slices) as executor:
-            #         for _ in executor.map(self.filter_along_axis_chunk_worker,
-            #                             chunk_indexes,
-            #                             chunk_sizes,
-            #                             chunk_offsets,
-            #                             kernels): #TODO: add appropriate arguments
-            #             logging.debug(f"PU #{_} finished")
+
         else:
             #Sequential
             print("Running sequentially")
@@ -349,8 +340,8 @@ class cFlowDenoiser():
         n_iterations = int(np.sum(np.array(self._data_vol.shape)))
 
         print(f"self.calculation_interrupt:{self.calculation_interrupt}")
-        print(f"self.stopEv.is_set():{self.stopEv.is_set()}")
-        while not self.stopEv.is_set() or not self.calculation_interrupt:
+        print(f"stopEv.is_set():{stopEv.is_set()}")
+        while not stopEv.is_set() or not self.calculation_interrupt:
             current_time = time.perf_counter()
             if self.timeout_mins > 0:
                 if (current_time - time_0) > (60 * self.timeout_mins):
@@ -401,7 +392,7 @@ class cFlowDenoiser():
         # Copy the volume to shared memory
         SM_vol=None
         SM_filtered_vol=None
-
+        
         try:
                 
             try:
@@ -474,7 +465,7 @@ class cFlowDenoiser():
             SM_filtered_vol.close()
             SM_filtered_vol.unlink()
             self.calculation_interrupt=True
-            self.stopEv.set()
+            stopEv.set()
 
 
 
@@ -531,7 +522,7 @@ def parseArgs():
 
 if __name__ == "__main__":
 
-    parser = parseArgs
+    parser = parseArgs()
     parser.description = __doc__
     args = parser.parse_args()
 
@@ -582,7 +573,7 @@ if __name__ == "__main__":
         levels=args.levels,
         winsize=args.winsize,
         disable_OF_compensation=args.no_OF,
-        enable_mem_map = args.mamory_map,
+        enable_mem_map = args.memory_map,
         max_number_of_processes=args.number_of_processes,
         bComputeFlowWithPreviousFlow=args.recompute_flow,
         timeout_mins = args.timeout,
@@ -630,7 +621,7 @@ if __name__ == "__main__":
         logging.debug(f"Writting MRC file")
         with mrcfile.new(args.output, overwrite=True) as mrc:
             mrc.set_data(_filtered_vol.astype(np.float32))
-            mrc.data
+            #mrc.data
     else:
         logging.debug(f"Writting TIFF file")
         skimage.io.imsave(args.output, _filtered_vol.astype(np.float32), plugin="tifffile")
