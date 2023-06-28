@@ -71,7 +71,8 @@ class cFlowDenoiser():
         max_number_of_processes=None,
         bComputeFlowWithPreviousFlow=True,
         timeout_mins = 30,
-        use_OF=True
+        use_OF=True,
+        do_sequentially=False,
         ):
 
         print(f"levels:{levels}")
@@ -100,6 +101,8 @@ class cFlowDenoiser():
         self.calculation_interrupt=False
 
         self.sm_name_suffix = str(random.randint(1000,9999))
+
+        self.do_sequentially=do_sequentially
         
 
 
@@ -146,8 +149,6 @@ class cFlowDenoiser():
         return flow
 
     def do_filter(self,kernels):
-        #TODO: test
-        #TODO: Put the monitoring code also here
 
         self.__percent__=0
 
@@ -178,7 +179,6 @@ class cFlowDenoiser():
 
     def filter_along_axis_slice(self,data_vol0,filtered_vol0, islice, kernel, axis_i):
         logging.debug(f"filter_along_axis_slice() with islice:{islice},  axis_i:{axis_i}")
-        #TODO: Test support of different axis
 
         assert kernel.size % 2 != 0 # kernel.size must be odd
 
@@ -238,13 +238,7 @@ class cFlowDenoiser():
         self.__percent__ += 1
 
     def filter_along_axis_chunk_worker(self, chunk_start_idx, chunk_size, kernel, axis_i):
-        logging.info(f"filter_along_axis_chunk_worker() with chunk_start_idx:{chunk_start_idx}, chunk_size:{chunk_size}, kernel:{kernel}, axis_i:{axis_i}")
-        #Collect exisiting shared memories of data_vol and filtered_vol
-        data_vol_sm = shared_memory.SharedMemory(name= "data_vol_"+ self.sm_name_suffix )
-        data_vol0 = np.ndarray(self.data_shape, dtype=self.data_type, buffer=data_vol_sm.buf)
-
-        filtered_vol_sm= shared_memory.SharedMemory(name="filtered_vol_"+ self.sm_name_suffix )
-        filtered_vol0 = np.ndarray(self.data_shape, dtype=self.data_type, buffer=filtered_vol_sm.buf)
+        logging.info(f"filter_along_axis_chunk_worker() with chunk_start_idx:{chunk_start_idx}, chunk_size:{chunk_size}, axis_i:{axis_i}")
 
         logging.info(f"Collected shared arrays")
 
@@ -254,15 +248,12 @@ class cFlowDenoiser():
                 break
         
             #Work slice-by-slice
-            self.filter_along_axis_slice(data_vol0,filtered_vol0, chunk_start_idx + i , kernel, axis_i)
-
-        data_vol_sm.close()
-        filtered_vol_sm.close()
+            self.filter_along_axis_slice(self._data_vol,self._filtered_vol, chunk_start_idx + i , kernel, axis_i)
 
         return chunk_start_idx
 
 
-    def filter_along_axis(self, kernel, axis_i, bSequential=False):
+    def filter_along_axis(self, kernel, axis_i):
         if not(axis_i==0 or axis_i==1 or axis_i==2):
             raise ValueError(f"Axis {axis_i} not valid")
         
@@ -274,14 +265,7 @@ class cFlowDenoiser():
             min_OF = 1000
             max_OF = -1000
 
-        isMain=False
-        if __name__ =="__main__": #Can only run parallel algorithm if it is main module
-            isMain=True
-            logging.info("This is __main__ module, so multiple processing is allowed")
-        else:
-            logging.info("Not __main__module. No parallel processing.")
-
-        if not bSequential and isMain:
+        if not self.do_sequentially:
             #Use the parallel processing algorithm
 
             #Don't need to create shared memories as
@@ -352,7 +336,7 @@ class cFlowDenoiser():
             axis_dim = self._data_vol.shape[axis_i]
             chunk_size = axis_dim
 
-            self.filter_along_axis_chunk_worker(chunk_index=0, chunk_size=chunk_size, chunk_offset=0, 
+            self.filter_along_axis_chunk_worker(chunk_start_idx=0, chunk_size=chunk_size,
                                                                  kernel=kernel, axis_i=axis_i)
         
 
@@ -374,7 +358,10 @@ class cFlowDenoiser():
             current_time = time.perf_counter()
             if self.timeout_mins > 0:
                 if (current_time - time_0) > (60 * self.timeout_mins):
-                    pass
+                    logging.info("Timeout to complete, stopping calcualtion")
+                    stopEv.set()
+                    self.calculation_interrupt=True
+
             logging.info(f"{self.__percent__}/{n_iterations} completed")
             time.sleep(1)
         logging.info("feedback_periodic thread stopped.")
@@ -416,58 +403,15 @@ class cFlowDenoiser():
         kernels[2] = self.get_gaussian_kernel(sigma[2])
         logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
 
-        # Copy the volume to shared memory
-        SM_vol=None
-        SM_filtered_vol=None
-        
+
+        self._data_vol=np.array(data_vol) #Simply copies
+
+        self._filtered_vol = np.zeros_like(data_vol)
+
+        if __debug__:
+            logging.info(f"Filtering ...")
+            time_0 = time.perf_counter()
         try:
-                
-            try:
-                SM_vol = shared_memory.SharedMemory(
-                    create=True,
-                    size=vol_size_bytes,
-                    name= "data_vol_"+ self.sm_name_suffix  )
-            except Exception as sm_vol_e:
-                raise MemoryError("Error creating shared memory SM_vol: {sm_vol_e}")
-                #sys.exit("Error creating shared memory SM_vol: {sm_vol_e}")
-
-            # _vol = np.ndarray(
-            #     shape=vol.shape,
-            #     dtype=vol.dtype,
-            #     buffer=SM_vol.buf)
-            # _vol[...] = vol[...]
-            # vol = _vol
-            self._data_vol = np.ndarray(
-                shape=data_vol.shape,
-                dtype=data_vol.dtype,
-                buffer=SM_vol.buf)
-            #Copy data
-            self._data_vol[...] = data_vol[...]
-
-            try:
-                SM_filtered_vol = shared_memory.SharedMemory(
-                    create=True,
-                    size=vol_size_bytes,
-                    name="filtered_vol_"+ self.sm_name_suffix )
-            except Exception as sm_filtered_vol_e:
-                #logging.error(f"Error: {sm_filtered_vol_e}")
-                SM_vol.close()
-                SM_vol.unlink()
-                raise MemoryError("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
-                #sys.exit("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
-            
-            #_filtered_vol is a global variable
-            #Consider putting this in a class
-            self._filtered_vol = np.ndarray(
-                shape=data_vol.shape,
-                dtype=data_vol.dtype,
-                buffer=SM_filtered_vol.buf)
-            self._filtered_vol.fill(0)
-
-            if __debug__:
-                logging.info(f"Filtering ...")
-                time_0 = time.perf_counter()
-
             #RUN THE FILTER
             self.do_filter(kernels)
 
@@ -476,24 +420,14 @@ class cFlowDenoiser():
                 time_1 = time.perf_counter()        
                 logging.info(f"Volume filtered in {time_1 - time_0} seconds")
 
-            result = np.array(self._filtered_vol) #makes a copy, to a non-shared memory space
-
+            result = np.array(self._filtered_vol) #makes a copy before returning
             return result
         
         except Exception as e:
-            logging.error(f"Some error occured: {str(e)}")
-            
-            
-        
+            logging.error("Something wrong happened.", str(e))
         finally:
-            logging.info("Closing and unlinking shared memory")
-            SM_vol.close()
-            SM_vol.unlink()
-            SM_filtered_vol.close()
-            SM_filtered_vol.unlink()
             self.calculation_interrupt=True
             stopEv.set()
-
 
 
 # def show_memory_usage(msg=''):
@@ -544,6 +478,8 @@ def parseArgs():
                         default=number_of_PUs)
     parser.add_argument("--recompute_flow", action="store_true", help="Disable the use of adjacent optical flow fields")
     parser.add_argument("--timeout", type=int, help="Timeout after x mins. Set to -1 for no timeout. Default 30 mins", default=30)
+
+    #TODO: add do_sequentially argument
 
     return parser
 
@@ -605,6 +541,7 @@ if __name__ == "__main__":
         bComputeFlowWithPreviousFlow=args.recompute_flow,
         timeout_mins = args.timeout,
         )
+    #TODO: add do_sequentially argument
     
     #run the filter
     _filtered_vol= filter0.runOpticalFlow(data_vol)

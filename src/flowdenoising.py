@@ -578,13 +578,6 @@ if __name__ == "__main__":
         create=True,
         size=vol_size,
         name="vol") # See /dev/shm/
-    
-    #Note that size of sharedmemory here is in bytes.
-    # Some inputs in shared memory may not be in uint8
-    # This needs to be fixed
-    # check example here https://docs.python.org/3/library/multiprocessing.shared_memory.html
-    
-
     _vol = np.ndarray(
         shape=vol.shape,
         dtype=vol.dtype,
