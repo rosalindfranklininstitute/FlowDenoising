@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowdenoising"
+version = "0.0.0"
+authors = [{ name="Vicente González Ruiz" , email="vruiz@ual.es"}]
+description = "FlowDenoising: (Optical Flow)-driven volumetric (3D) Gaussian denoising"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file="LICENSE.txt"}
+
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Framework :: napari",
+    "Topic :: Software Development :: Testing",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)"
+]
+
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "mrcfile",
+    "scikit-image",
+    "tifffile"
+]
+
+[project.urls]
+Repository = "https://github.com/microscopy-processing/FlowDenoising"
+
+[project.scripts]
+my-script = "flowdenoising:flowdenoising"

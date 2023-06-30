@@ -14,7 +14,10 @@
 
 Code put in a class so that it potentially run in a notebook or integrated in other programs
 
-NOT WORKING
+Can be ran as module, although it is slower than the multiprocess option.
+This is more of a problem in Linux. In windows the multi-threading seems to work fine
+
+
 """
 
 import logging
@@ -32,11 +35,12 @@ import threading
 
 # import concurrent
 import multiprocessing
-from multiprocessing import shared_memory, Value
-from concurrent.futures.process import ProcessPoolExecutor
+#from multiprocessing import shared_memory, Value
+#from concurrent.futures.process import ProcessPoolExecutor
 import random
-import _thread
-import sys
+#import _thread
+#import sys
+import concurrent.futures
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
@@ -65,21 +69,18 @@ class cFlowDenoiser():
         sigma=(2.0,2.0,2.0),
         levels=3 ,
         winsize=5 ,
-        disable_OF_compensation=True,
-        enable_mem_map = True,
         max_number_of_processes=None,
         bComputeFlowWithPreviousFlow=True,
         timeout_mins = 30,
-        use_OF=True
+        use_OF=True,
+        do_sequentially=False,
         ):
 
-        print(f"levels:{levels}")
-        print(f"winsize:{winsize}")
+        #print(f"levels:{levels}")
+        #print(f"winsize:{winsize}")
         self.SIGMA= sigma
         self.OF_LEVELS= levels
         self.OF_WINDOW_SIZE= winsize
-        self.disable_OF_compensation=disable_OF_compensation
-        self.enable_mem_map= enable_mem_map
         
         number_of_PUs = multiprocessing.cpu_count()
         logging.info(f"Number of processing units: {number_of_PUs}")
@@ -99,8 +100,11 @@ class cFlowDenoiser():
         self.calculation_interrupt=False
 
         self.sm_name_suffix = str(random.randint(1000,9999))
-        
 
+        self.do_sequentially=do_sequentially
+
+        self.slice_filter_method=0 #Two methods currently being tested
+        
 
     @staticmethod
     def get_gaussian_kernel(sigma=1):
@@ -145,8 +149,6 @@ class cFlowDenoiser():
         return flow
 
     def do_filter(self,kernels):
-        #TODO: test
-        #TODO: Put the monitoring code also here
 
         self.__percent__=0
 
@@ -175,48 +177,84 @@ class cFlowDenoiser():
         # There no stop() function to do that, so Event() is used
         stopEv.set()
 
-    def filter_along_axis_slice(self,data_vol0,filtered_vol0, islice, kernel, axis_i):
+    def filter_along_axis_slice(self,islice, kernel, axis_i):
         logging.debug(f"filter_along_axis_slice() with islice:{islice},  axis_i:{axis_i}")
-        #TODO: Test support of different axis
+        #print (f"filter_along_axis_slice() with islice:{islice},  axis_i:{axis_i}, kernel.size:{kernel.size}")
+        
+        data_vol0=self._data_vol
+        filtered_vol0=self._filtered_vol
 
-        assert kernel.size % 2 != 0 # kernel.size must be odd
+        assert kernel.size % 2 != 0, "Error kernel.size must be odd"
 
         ks2 = kernel.size//2
-
+        assert kernel.size== 2*ks2+1 , "Error"
+        
         #logging.info("Transposing if needed")
         if axis_i==0:
-            data_vol_transp=data_vol0
+            data_vol_transp=data_vol0 #Potentially GIL locking making slow execution
+            # data_vol_transp= data_vol0.copy() #Makes no difference in linux
         elif axis_i==1:
             data_vol_transp=np.transpose(data_vol0,axes=(1,0,2))
         elif axis_i==2:
             data_vol_transp=np.transpose(data_vol0,axes=(2,0,1))
-                            
-        tmp_slice = np.zeros_like(data_vol_transp[islice, :, :]).astype(np.float32)
+
+        data_islice = data_vol_transp[islice,:,:]
+        #data_islice = data_roi[ks2,:,:]
+        tmp_slice = np.zeros_like(data_islice).astype(np.float32)
+        slice_shape= tmp_slice.shape
 
         if self.use_OF:
-            prev_flow = np.zeros(shape=(data_vol_transp.shape[1], data_vol_transp.shape[2], 2), dtype=np.float32)
+            prev_flow = np.zeros(shape=(*slice_shape, 2), dtype=np.float32)
 
-            #Note that the mod (%) is used here to introduce circularity in picking adjacent slices
-            for i in range(ks2 - 1, -1, -1):
-                flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
-                                data_vol_transp[islice, :, :], prev_flow)
-                #indices of reference slice go from islice+ks2-1-ks2 = islice-1
-                # decreasing to islice-ks2 (including)
+            if self.slice_filter_method==0:
+                data_roi = np.roll(data_vol_transp, shift= -(islice- ks2), axis=0)[:kernel.size,:,:] #Gets ROI by rolling and then cropping
+                #i_values= []
+                #Down-side
+                for i in range(ks2-1,-1,-1): #data slices from middle-1 to down boundary
+                    ref = data_roi[i,:,:]
+                    flow = self.get_flow(ref, data_islice, prev_flow)
+                    prev_flow = flow
+                    OF_compensated_slice = self.warp_slice(ref, flow)
+                    tmp_slice += OF_compensated_slice * kernel[i]
+                    #i_values.append(i)  
+                #print(f"i_values down:{i_values}")
 
-                prev_flow = flow
-                OF_compensated_slice = self.warp_slice(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :], flow)
-                tmp_slice += OF_compensated_slice * kernel[i]
-            tmp_slice += data_vol_transp[islice, :, :] * kernel[ks2]
-            prev_flow = np.zeros(shape=(data_vol_transp.shape[1], data_vol_transp.shape[2], 2), dtype=np.float32)
-            
-            for i in range(ks2 + 1, kernel.size):
-                flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
-                                data_vol_transp[islice, :, :], prev_flow)
-                #indices of reference slice go from islice+ks2+1-ks2 = islice+1
-                #increasing to islice+kernel.size-1-ks2 (including)
-                prev_flow = flow
-                OF_compensated_slice = self.warp_slice(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :], flow)
-                tmp_slice += OF_compensated_slice * kernel[i]
+                tmp_slice += data_islice * kernel[ks2] #Middle slice, no OF needed, just kernel convolve
+                #i_values.append(ks2)
+
+                prev_flow = np.zeros(shape=(*slice_shape, 2), dtype=np.float32)
+                #Up-side
+                for i in range(ks2+1,kernel.size, +1):
+                    ref = data_roi[i,:,:]
+                    flow = self.get_flow(ref, data_islice, prev_flow)
+                    prev_flow = flow
+                    OF_compensated_slice = self.warp_slice(ref, flow)
+                    tmp_slice += OF_compensated_slice * kernel[i]
+                    #i_values.append(i)
+                #print(f"i_values down-up:{i_values}")           
+
+            else:
+                #Note that the mod (%) is used here to introduce circularity in picking adjacent slices
+                for i in range(ks2 - 1, -1, -1):
+                    flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
+                                    data_vol_transp[islice, :, :], prev_flow)
+                    #indices of reference slice go from islice+ks2-1-ks2 = islice-1
+                    # decreasing to islice-ks2 (including)
+
+                    prev_flow = flow
+                    OF_compensated_slice = self.warp_slice(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :], flow)
+                    tmp_slice += OF_compensated_slice * kernel[i]
+                tmp_slice += data_vol_transp[islice, :, :] * kernel[ks2]
+                prev_flow = np.zeros(shape=(*slice_shape, 2), dtype=np.float32)
+                
+                for i in range(ks2 + 1, kernel.size):
+                    flow = self.get_flow(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :],
+                                    data_vol_transp[islice, :, :], prev_flow)
+                    #indices of reference slice go from islice+ks2+1-ks2 = islice+1
+                    #increasing to islice+kernel.size-1-ks2 (including)
+                    prev_flow = flow
+                    OF_compensated_slice = self.warp_slice(data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :], flow)
+                    tmp_slice += OF_compensated_slice * kernel[i]
         else:
             #No OF
             #Simple 2D convolution (2D*2D) and sum along z axis? with circularity
@@ -225,7 +263,7 @@ class cFlowDenoiser():
                 tmp_slice += data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :]*kernel[i]
 
 
-        #logging.info("Restoring orienation")
+        #logging.info("Restoring orieantion")
         if axis_i==0:
             filtered_vol0[islice, :, :] = tmp_slice
         elif axis_i==1:
@@ -236,28 +274,24 @@ class cFlowDenoiser():
         # self.filtered_vol0[islice, :, :] = tmp_slice
         self.__percent__ += 1
 
-    def filter_along_axis_chunk_worker(self, chunk_index, chunk_size, chunk_offset, kernel, axis_i):
-        logging.info(f"filter_along_axis_chunk_worker() with chunk_index:{chunk_index}, chunk_size:{chunk_size}, kernel:{kernel}, axis_i:{axis_i}")
-        #Collect exisiting shared memories of data_vol and filtered_vol
-        data_vol_sm = shared_memory.SharedMemory(name= "data_vol_"+ self.sm_name_suffix )
-        data_vol0 = np.ndarray(self.data_shape, dtype=self.data_type, buffer=data_vol_sm.buf)
 
-        filtered_vol_sm= shared_memory.SharedMemory(name="filtered_vol_"+ self.sm_name_suffix )
-        filtered_vol0 = np.ndarray(self.data_shape, dtype=self.data_type, buffer=filtered_vol_sm.buf)
+    def filter_along_axis_chunk_worker(self, chunk_start_idx, chunk_size, kernel, axis_i):
+        logging.info(f"filter_along_axis_chunk_worker() with chunk_start_idx:{chunk_start_idx}, chunk_size:{chunk_size}, axis_i:{axis_i}")
 
-        logging.info(f"Collected shared arrays")
+        #logging.info(f"Collected shared arrays")
 
         for i in range(chunk_size):
+            if self.calculation_interrupt:
+                logging.info(f"Interrupting task with chunk_start_idx {chunk_start_idx}")
+                break
+        
             #Work slice-by-slice
-            self.filter_along_axis_slice(data_vol0,filtered_vol0, chunk_index*chunk_size + i + chunk_offset, kernel, axis_i)
+            self.filter_along_axis_slice(chunk_start_idx + i , kernel, axis_i)    
 
-        data_vol_sm.close()
-        filtered_vol_sm.close()
-
-        return chunk_index
+        return chunk_start_idx
 
 
-    def filter_along_axis(self, kernel, axis_i, bSequential=False):
+    def filter_along_axis(self, kernel, axis_i):
         if not(axis_i==0 or axis_i==1 or axis_i==2):
             raise ValueError(f"Axis {axis_i} not valid")
         
@@ -269,53 +303,70 @@ class cFlowDenoiser():
             min_OF = 1000
             max_OF = -1000
 
-        isMain=False
-        if __name__ =="__main__": #Can only run parallel algorithm if it is main module
-            isMain=True
-            print("This is __main__ module, so multiple processing is allowed")
-        else:
-            print("Not __main__module. No parallel processing.")
-
-        if not bSequential and isMain:
+        if not self.do_sequentially:
             #Use the parallel processing algorithm
 
             #Don't need to create shared memories as
             # self._data_vol and self._filtered_vol are already shared
             # with names "data_vol_sm" and "filtered_vol_sm"
-
-            # TODO: Consider doing parallel processing with threads so that no __main__ requirement is needed
             
             axis_dim = self._data_vol.shape[axis_i]
+            logging.info(f"axis_dim:{axis_dim}")
+            logging.info(f"self.max_number_of_processes:{self.max_number_of_processes}")
 
             #chunk_size = axis_dim//self.max_number_of_processes
             # last slices, leave last process for last processing
             chunk_size = axis_dim//(self.max_number_of_processes)
-            n_remain_slices = axis_dim % (self.max_number_of_processes)
+            n_remain_slices = axis_dim % self.max_number_of_processes
+            logging.info(f"n_remain_slices:{n_remain_slices}")
 
-            #Arguments for the ProcessPoolExecutor
-            chunk_indexes = [i for i in range(self.max_number_of_processes)]
+            #Arguments for PoolExecutor
+            chunk_start_indexes = [i*chunk_size for i in range(self.max_number_of_processes)]
             chunk_sizes = [chunk_size]*(self.max_number_of_processes)
-            chunk_offsets = [0]*self.max_number_of_processes
             kernels = [kernel]*self.max_number_of_processes
             axis_i_s = [axis_i]*self.max_number_of_processes
-            if n_remain_slices>0:
-                chunk_indexes.append(self.max_number_of_processes)
+            if n_remain_slices>0: #last slices
+                chunk_start_indexes.append(self.max_number_of_processes*chunk_size )
                 chunk_sizes.append(n_remain_slices)
-                chunk_offsets.append(0)
                 kernels.append(kernel)
                 axis_i_s.append(axis_i)
 
-            with ProcessPoolExecutor(max_workers=self.max_number_of_processes) as executor:
+            logging.info(f"chunk_indexes:{chunk_start_indexes}")
+            logging.info(f"chunk_sizes:{chunk_sizes}")
+            #logging.info(f"kernels:{kernels}")
+            logging.info(f"axis_i_s:{axis_i_s}")
+
+            logging.info("Starting threads")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_number_of_processes) as executor:
                 
-                #def filter_along_axis_chunk_worker(self, chunk_index, chunk_size, chunk_offset, kernel, axis_i):
-                for _ in executor.map(self.filter_along_axis_chunk_worker,
-                                    chunk_indexes,
-                                    chunk_sizes,
-                                    chunk_offsets,
-                                    kernels,
-                                    axis_i_s,
-                                    ):
-                    logging.debug(f"PE #{_} has finished")
+                
+                # futures = [executor.submit(self.filter_along_axis_chunk_worker,
+                #                             chunk_indexes,
+                #                             chunk_sizes,
+                #                             chunk_offsets,
+                #                             kernels,
+                #                             axis_i_s) for i in range(self.max_number_of_processes)]
+
+                futures=[]
+                for args0 in zip(chunk_start_indexes,chunk_sizes,kernels,axis_i_s):
+                    exec0=executor.submit(self.filter_along_axis_chunk_worker, *args0)
+                    futures.append(exec0)
+
+                done, not_done = concurrent.futures.wait(futures, timeout=0) #returns result immediately
+                try:
+                    while not_done:
+                        freshly_done, not_done= concurrent.futures.wait(futures, timeout=3)
+                        done |= freshly_done #This line is probably not needed
+                except KeyboardInterrupt:
+                    print("**** EXCEPTION KeyboardInterrupt****. Cancelling other tasks.")
+                    self.calculation_interrupt=True
+                    # only futures that are not done will prevent exiting
+                    for future in not_done:
+                        # cancel() returns False if it's already done or currently running,
+                        # and True if was able to cancel it; we don't need that return value
+                        _ = future.cancel()
+                    # wait for running futures that the above for loop couldn't cancel (note timeout)
+                    _ = concurrent.futures.wait(not_done, timeout=None)
 
         else:
             #Sequential
@@ -323,7 +374,7 @@ class cFlowDenoiser():
             axis_dim = self._data_vol.shape[axis_i]
             chunk_size = axis_dim
 
-            self.filter_along_axis_chunk_worker(chunk_index=0, chunk_size=chunk_size, chunk_offset=0, 
+            self.filter_along_axis_chunk_worker(chunk_start_idx=0, chunk_size=chunk_size,
                                                                  kernel=kernel, axis_i=axis_i)
         
 
@@ -345,9 +396,10 @@ class cFlowDenoiser():
             current_time = time.perf_counter()
             if self.timeout_mins > 0:
                 if (current_time - time_0) > (60 * self.timeout_mins):
-                    pass
-                    #_thread.interrupt_main() #may not work inside a class                    raise Exception(f"Timeout reached {self.timeout_mins} mins elapsed. Terminating now.")
-            #logging.info(f"{100*self.__percent__.value/np.sum(data_vol.shape):3.2f} % completed")
+                    logging.info("Timeout to complete, stopping calcualtion")
+                    stopEv.set()
+                    self.calculation_interrupt=True
+
             logging.info(f"{self.__percent__}/{n_iterations} completed")
             time.sleep(1)
         logging.info("feedback_periodic thread stopped.")
@@ -389,58 +441,15 @@ class cFlowDenoiser():
         kernels[2] = self.get_gaussian_kernel(sigma[2])
         logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
 
-        # Copy the volume to shared memory
-        SM_vol=None
-        SM_filtered_vol=None
-        
+
+        self._data_vol=np.array(data_vol) #Simply copies
+
+        self._filtered_vol = np.zeros_like(data_vol)
+
+        if __debug__:
+            logging.info(f"Filtering ...")
+            time_0 = time.perf_counter()
         try:
-                
-            try:
-                SM_vol = shared_memory.SharedMemory(
-                    create=True,
-                    size=vol_size_bytes,
-                    name= "data_vol_"+ self.sm_name_suffix  )
-            except Exception as sm_vol_e:
-                raise MemoryError("Error creating shared memory SM_vol: {sm_vol_e}")
-                #sys.exit("Error creating shared memory SM_vol: {sm_vol_e}")
-
-            # _vol = np.ndarray(
-            #     shape=vol.shape,
-            #     dtype=vol.dtype,
-            #     buffer=SM_vol.buf)
-            # _vol[...] = vol[...]
-            # vol = _vol
-            self._data_vol = np.ndarray(
-                shape=data_vol.shape,
-                dtype=data_vol.dtype,
-                buffer=SM_vol.buf)
-            #Copy data
-            self._data_vol[...] = data_vol[...]
-
-            try:
-                SM_filtered_vol = shared_memory.SharedMemory(
-                    create=True,
-                    size=vol_size_bytes,
-                    name="filtered_vol_"+ self.sm_name_suffix )
-            except Exception as sm_filtered_vol_e:
-                #logging.error(f"Error: {sm_filtered_vol_e}")
-                SM_vol.close()
-                SM_vol.unlink()
-                raise MemoryError("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
-                #sys.exit("Error creating shared memory SM_filtered_vol: {sm_vol_e}")
-            
-            #_filtered_vol is a global variable
-            #Consider putting this in a class
-            self._filtered_vol = np.ndarray(
-                shape=data_vol.shape,
-                dtype=data_vol.dtype,
-                buffer=SM_filtered_vol.buf)
-            self._filtered_vol.fill(0)
-
-            if __debug__:
-                logging.info(f"Filtering ...")
-                time_0 = time.perf_counter()
-
             #RUN THE FILTER
             self.do_filter(kernels)
 
@@ -449,24 +458,14 @@ class cFlowDenoiser():
                 time_1 = time.perf_counter()        
                 logging.info(f"Volume filtered in {time_1 - time_0} seconds")
 
-            result = np.array(self._filtered_vol) #makes a copy, to a non-shared memory space
-
+            result = np.array(self._filtered_vol) #makes a copy before returning
             return result
         
         except Exception as e:
-            logging.error(f"Some error occured: {str(e)}")
-            
-            
-        
+            logging.error("Something wrong happened.", str(e))
         finally:
-            logging.info("Closing and unlinking shared memory")
-            SM_vol.close()
-            SM_vol.unlink()
-            SM_filtered_vol.close()
-            SM_filtered_vol.unlink()
             self.calculation_interrupt=True
             stopEv.set()
-
 
 
 # def show_memory_usage(msg=''):
@@ -486,9 +485,7 @@ def parseArgs():
 
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    #parser.add_argument("-t", "--transpose", nargs="+",
-    #                    help="Transpose pattern (see https://numpy.org/doc/stable/reference/generated/numpy.transpose.html, by default the 3D volume in not transposed)",
-    #                    default=(0, 1, 2))
+
     parser.add_argument("-i", "--input", type=int_or_str,
                         help="Input a MRC-file or a multi-image TIFF-file",
                         default="./volume.mrc")
@@ -507,9 +504,6 @@ def parseArgs():
     parser.add_argument("-v", "--verbosity", type=int_or_str,
                         help="Verbosity level", default=0)
     parser.add_argument("-n", "--no_OF", action="store_true", help="Disable optical flow compensation")
-    parser.add_argument("-m", "--memory_map",
-                        action="store_true",
-                        help="Enable memory-mapping (see https://mrcfile.readthedocs.io/en/stable/usage_guide.html#dealing-with-large-files, only for MRC files)")
     
     number_of_PUs = multiprocessing.cpu_count()
     parser.add_argument("-p", "--number_of_processes", type=int_or_str,
@@ -517,6 +511,8 @@ def parseArgs():
                         default=number_of_PUs)
     parser.add_argument("--recompute_flow", action="store_true", help="Disable the use of adjacent optical flow fields")
     parser.add_argument("--timeout", type=int, help="Timeout after x mins. Set to -1 for no timeout. Default 30 mins", default=30)
+
+    #TODO: add do_sequentially argument
 
     return parser
 
@@ -535,7 +531,7 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(format=LOGGING_FORMAT, level=logging.CRITICAL)
     
-    sigma = [float(i) for i in args.sigma]
+
 
     if __debug__:
         logging.info(f"reading \"{args.input}\"")
@@ -543,88 +539,64 @@ if __name__ == "__main__":
 
     logging.debug(f"input = {args.input}")
 
-    is_MRC_input = ( args.input.split('.')[-1] == "MRC" or args.input.split('.')[-1] == "mrc" )
-    if is_MRC_input:
-        if args.memory_map:
-            logging.info(f"Using memory mapping")
-            vol_MRC = rc = mrcfile.mmap(args.input, mode='r+')
-        else:
-            vol_MRC = mrcfile.open(args.input, mode="r+")
-        data_vol = vol_MRC.data
+    if "mrc" in args.input.split('.')[-1].lower():
+        logging.info(f"Input file is MRC")
+        # if args.memory_map:
+        #     logging.info(f"Using memory mapping")
+        #     vol_MRC = rc = mrcfile.mmap(args.input, mode='r+')
+        #     data_vol = vol_MRC.data
+        # else:
+        with  mrcfile.open(args.input, mode="r") as vol_MRC:     
+            data_vol = vol_MRC.data
     else:
-        data_vol = skimage.io.imread(args.input, plugin="tifffile").astype(np.float32)
-    vol_size = data_vol.dtype.itemsize * data_vol.size
-    
-    # logging.info(f"shape of the input volume (Z, Y, X) = {data_vol.shape}")
-    # logging.info(f"type of the volume = {data_vol.dtype}")
-    # logging.info(f"vol requires {vol_size/(1024*1024):.1f} MB")
-    # logging.info(f"{args.input} max = {data_vol.max()}")
-    # logging.info(f"{args.input} min = {data_vol.min()}")
-    # vol_mean = data_vol.mean()
-    # logging.info(f"Input vol average = {vol_mean}")
+        #data_vol = skimage.io.imread(args.input, plugin="tifffile").astype(np.float32)
+        data_vol = skimage.io.imread(args.input)
 
     if __debug__:
         time_1 = time.perf_counter()
         logging.info(f"read \"{args.input}\" in {time_1 - time_0} seconds")
-
-    #Setup and run filter
+    
+    logging.info(f"args : {args}")
+    sigma = [float(i) for i in args.sigma]
+    
+    #Setup filter
     filter0 = cFlowDenoiser(
         sigma=sigma,
         levels=args.levels,
         winsize=args.winsize,
-        disable_OF_compensation=args.no_OF,
-        enable_mem_map = args.memory_map,
         max_number_of_processes=args.number_of_processes,
-        bComputeFlowWithPreviousFlow=args.recompute_flow,
+        bComputeFlowWithPreviousFlow= not args.recompute_flow,
         timeout_mins = args.timeout,
+        use_OF= not args.no_OF,
         )
+    #filter0 = cFlowDenoiser()
+    #TODO: add do_sequentially argument
     
-    #run the filter
-    _filtered_vol= filter0.runOpticalFlow(data_vol)
+    # *** run the filter
+    filtered_vol0= filter0.runOpticalFlow(data_vol)
 
-    logging.info(f"{args.output} type = {_filtered_vol.dtype}")
-    logging.info(f"{args.output} max = {_filtered_vol.max()}")
-    logging.info(f"{args.output} min = {_filtered_vol.min()}")
-    logging.info(f"{args.output} average = {_filtered_vol.mean()}")
+    #print results statistics
+    logging.info(f"{args.output} type = {filtered_vol0.dtype}")
+    logging.info(f"{args.output} max = {filtered_vol0.max()}")
+    logging.info(f"{args.output} min = {filtered_vol0.min()}")
+    logging.info(f"{args.output} average = {filtered_vol0.mean()}")
 
-    # #Starts filtering
-    # if args.no_OF:
-    #     no_OF_filter(kernels) #Filters without optical flow
-    # else:
-    #     OF_filter(kernels, levels, winsize) #Filters with optical flow
-
-    #When filtering is complete it continues here
-    #stop feedback_thread.
-    # There no stop() function to do that, so Event() is used
-    # stopEv.set()
-
-    # if __debug__:
-    #     #time_1 = time.perf_counter()        
-    #     time_1 = time.perf_counter()        
-    #     logging.info(f"Volume filtered in {time_1 - time_0} seconds")
-
-    #filtered_vol = np.transpose(filtered_vol, transpose_pattern)
-    logging.info(f"{args.output} type = {_filtered_vol.dtype}")
-    logging.info(f"{args.output} max = {_filtered_vol.max()}")
-    logging.info(f"{args.output} min = {_filtered_vol.min()}")
-    logging.info(f"{args.output} average = {_filtered_vol.mean()}")
-    
     if __debug__:
         logging.info(f"writting \"{args.output}\"")
         time_0 = time.perf_counter()
 
     logging.debug(f"output = {args.output}")
 
-    MRC_output = ( args.output.split('.')[-1] == "MRC" or args.output.split('.')[-1] == "mrc" )
-
-    if MRC_output:
-        logging.debug(f"Writting MRC file")
+    if "mrc" in args.output.split('.')[-1].lower():
+        logging.info(f"Writting MRC file")
         with mrcfile.new(args.output, overwrite=True) as mrc:
-            mrc.set_data(_filtered_vol.astype(np.float32))
+            #mrc.set_data(_filtered_vol.astype(np.float32))
+            mrc.set_data(filtered_vol0)
             #mrc.data
     else:
         logging.debug(f"Writting TIFF file")
-        skimage.io.imsave(args.output, _filtered_vol.astype(np.float32), plugin="tifffile")
+        #skimage.io.imsave(args.output, _filtered_vol.astype(np.float32), plugin="tifffile")
+        skimage.io.imsave(args.output, filtered_vol0, plugin="tifffile")
 
     if __debug__:
         time_1 = time.perf_counter()        
