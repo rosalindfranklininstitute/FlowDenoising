@@ -472,8 +472,8 @@ parser.add_argument("-v", "--verbosity", type=int_or_str,
 parser.add_argument("-n", "--no_OF", action="store_true", help="Disable optical flow compensation")
 parser.add_argument("-m", "--memory_map", action="store_true", help="Enable memory-mapping (see https://mrcfile.readthedocs.io/en/stable/usage_guide.html#dealing-with-large-files, only for MRC files)")
 
-if __name__ == "__main__":
 
+def main():
     parser.description = __doc__
     args = parser.parse_args()
     
@@ -573,3 +573,8 @@ if __name__ == "__main__":
     if __debug__:
         time_1 = time.perf_counter()        
         logging.info(f"written \"{args.output}\" in {time_1 - time_0} seconds")
+
+if __name__ == "__main__":
+    main()
+
+

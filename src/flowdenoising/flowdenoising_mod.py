@@ -108,7 +108,7 @@ class cFlowDenoiser():
 
     @staticmethod
     def get_gaussian_kernel(sigma=1):
-        logging.info(f"Computing gaussian kernel with sigma={sigma}")
+        logging.debug(f"Computing gaussian kernel with sigma={sigma}")
         number_of_coeffs = 3
         number_of_zeros = 0
         while number_of_zeros < 2 :
@@ -276,7 +276,7 @@ class cFlowDenoiser():
 
 
     def filter_along_axis_chunk_worker(self, chunk_start_idx, chunk_size, kernel, axis_i):
-        logging.info(f"filter_along_axis_chunk_worker() with chunk_start_idx:{chunk_start_idx}, chunk_size:{chunk_size}, axis_i:{axis_i}")
+        logging.debug(f"filter_along_axis_chunk_worker() with chunk_start_idx:{chunk_start_idx}, chunk_size:{chunk_size}, axis_i:{axis_i}")
 
         #logging.info(f"Collected shared arrays")
 
@@ -296,7 +296,7 @@ class cFlowDenoiser():
             raise ValueError(f"Axis {axis_i} not valid")
         
         #global __percent__
-        logging.info(f"Filtering along axis {axis_i} with l={self.OF_LEVELS}, w={self.OF_WINDOW_SIZE}, and kernel length={kernel.size}")
+        logging.debug(f"Filtering along axis {axis_i} with l={self.OF_LEVELS}, w={self.OF_WINDOW_SIZE}, and kernel length={kernel.size}")
 
         if __debug__:
             time_0 = time.perf_counter()
@@ -358,7 +358,7 @@ class cFlowDenoiser():
                         freshly_done, not_done= concurrent.futures.wait(futures, timeout=3)
                         done |= freshly_done #This line is probably not needed
                 except KeyboardInterrupt:
-                    print("**** EXCEPTION KeyboardInterrupt****. Cancelling other tasks.")
+                    logging.error("**** EXCEPTION KeyboardInterrupt****. Cancelling other tasks.")
                     self.calculation_interrupt=True
                     # only futures that are not done will prevent exiting
                     for future in not_done:
@@ -370,7 +370,7 @@ class cFlowDenoiser():
 
         else:
             #Sequential
-            print("Running sequentially")
+            logging.info("Running sequentially")
             axis_dim = self._data_vol.shape[axis_i]
             chunk_size = axis_dim
 
@@ -390,19 +390,19 @@ class cFlowDenoiser():
         time_0 = time.perf_counter()
         n_iterations = int(np.sum(np.array(self._data_vol.shape)))
 
-        print(f"self.calculation_interrupt:{self.calculation_interrupt}")
-        print(f"stopEv.is_set():{stopEv.is_set()}")
+        logging.debug(f"self.calculation_interrupt:{self.calculation_interrupt}")
+        logging.debug(f"stopEv.is_set():{stopEv.is_set()}")
         while not stopEv.is_set() or not self.calculation_interrupt:
             current_time = time.perf_counter()
             if self.timeout_mins > 0:
                 if (current_time - time_0) > (60 * self.timeout_mins):
-                    logging.info("Timeout to complete, stopping calcualtion")
+                    logging.debug("Timeout to complete, stopping calculation")
                     stopEv.set()
                     self.calculation_interrupt=True
 
             logging.info(f"{self.__percent__}/{n_iterations} completed")
             time.sleep(1)
-        logging.info("feedback_periodic thread stopped.")
+        logging.debug("feedback_periodic thread stopped.")
 
 
     def runOpticalFlow(self, data_vol:np.ndarray):
@@ -516,8 +516,7 @@ def parseArgs():
 
     return parser
 
-if __name__ == "__main__":
-
+def main():
     parser = parseArgs()
     parser.description = __doc__
     args = parser.parse_args()
@@ -602,4 +601,5 @@ if __name__ == "__main__":
         time_1 = time.perf_counter()        
         logging.info(f"written \"{args.output}\" in {time_1 - time_0} seconds")
 
-
+if __name__ == "__main__":
+    main()

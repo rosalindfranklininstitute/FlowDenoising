@@ -506,7 +506,8 @@ parser.add_argument("--recompute_flow", action="store_true", help="Disable the u
 def show_memory_usage(msg=''):
     logging.info(f"{psutil.Process(os.getpid()).memory_info().rss/(1024*1024):.1f} MB used in process {os.getpid()} {msg}")
 
-if __name__ == "__main__":
+
+def main():
 
     parser.description = __doc__
     args = parser.parse_args()
@@ -652,3 +653,9 @@ if __name__ == "__main__":
     if __debug__:
         time_1 = time.perf_counter()        
         logging.info(f"written \"{args.output}\" in {time_1 - time_0} seconds")
+
+
+if __name__ == "__main__":
+    #Moved code to main() so that installation can be compatible with [project.scripts]
+    # (see pyproject.toml), and use simply by calling flowdenosing
+    main()

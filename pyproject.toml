@@ -37,4 +37,6 @@ dependencies = [
 Repository = "https://github.com/microscopy-processing/FlowDenoising"
 
 [project.scripts]
-my-script = "flowdenoising:flowdenoising"
+flowdenoising = "flowdenoising.flowdenoising:main"
+flowdenoising_seq = "flowdenoising.flowdenoising_sequential:main"
+flowdenoising_mod = "flowdenoising.flowdenoising_mod:main"

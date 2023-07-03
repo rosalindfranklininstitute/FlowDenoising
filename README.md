@@ -14,3 +14,27 @@ Example of use:
     > python flowdenoising.py -i vol.mrc -o denoised_vol.mrc
     
 The [manual](https://github.com/microscopy-processing/FlowDenoising/blob/main/manual/manual.ipynb) provides detailed, practical information about the usage of the software.
+
+# Installation
+
+Download package source code in a python environment with setuptools isntalled.
+Then execute:
+```
+> pip install .
+```
+
+# Usage as module
+
+In your code, use
+
+```
+import flowdenoising.flowdenoising_mod as fdnm
+
+# load data
+......
+
+filter = fdnrfi_th.cFlowDenoiser() #Can put adjust several paramters here when initializing class
+
+data_filtered = filter.runOpticalFlow(data)
+
+```
