@@ -73,7 +73,7 @@ class cFlowDenoiser():
         bComputeFlowWithPreviousFlow=True,
         timeout_mins = 30,
         use_OF=True,
-        do_sequentially=False,
+        process_mode='threaded', #choices=['threaded', 'sequential','multiproc']
         ):
 
         #print(f"levels:{levels}")
@@ -101,10 +101,20 @@ class cFlowDenoiser():
 
         self.sm_name_suffix = str(random.randint(1000,9999))
 
-        self.do_sequentially=do_sequentially
+        self.process_mode=process_mode
 
         self.slice_filter_method=0 #Two methods currently being tested
-        
+
+        # setup kernels here
+        self.updateKernels()
+
+    def updateKernels(self):
+        #Note that
+        self._kernels = [None]*3
+        self._kernels[0] = self.get_gaussian_kernel(self.SIGMA[0])
+        self._kernels[1] = self.get_gaussian_kernel(self.SIGMA[1])
+        self._kernels[2] = self.get_gaussian_kernel(self.SIGMA[2])
+        logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*self._kernels]]}")
 
     @staticmethod
     def get_gaussian_kernel(sigma=1):
@@ -148,7 +158,7 @@ class cFlowDenoiser():
             logging.debug(f"OF computed in {1000*(time_1 - time_0):4.3f} ms, max_X={np.max(flow[0]):+3.2f}, min_X={np.min(flow[0]):+3.2f}, max_Y={np.max(flow[1]):+3.2f}, min_Y={np.min(flow[1]):+3.2f}")
         return flow
 
-    def do_filter(self,kernels):
+    def do_filter(self):
 
         self.__percent__=0
 
@@ -161,15 +171,15 @@ class cFlowDenoiser():
         feddback_thread.start()
 
         logging.info("Filtering along Z")
-        self.filter_along_axis(kernels[0],  axis_i=0)
+        self.filter_along_axis(self._kernels[0],  axis_i=0)
         self._data_vol[...] = self._filtered_vol[...]
 
         logging.info("Filtering along Y")
-        self.filter_along_axis(kernels[0], axis_i=1)
+        self.filter_along_axis(self._kernels[1], axis_i=1)
         self._data_vol[...] = self._filtered_vol[...]
 
         logging.info("Filtering along X")
-        self.filter_along_axis(kernels[0], axis_i=2)
+        self.filter_along_axis(self._kernels[2], axis_i=2)
         self._data_vol[...] = self._filtered_vol[...]
 
         #When filtering is complete it continues here
@@ -303,7 +313,7 @@ class cFlowDenoiser():
             min_OF = 1000
             max_OF = -1000
 
-        if not self.do_sequentially:
+        if 'threaded' in self.process_mode:
             #Use the parallel processing algorithm
 
             #Don't need to create shared memories as
@@ -368,7 +378,7 @@ class cFlowDenoiser():
                     # wait for running futures that the above for loop couldn't cancel (note timeout)
                     _ = concurrent.futures.wait(not_done, timeout=None)
 
-        else:
+        elif 'sequential' in self.process_mode:
             #Sequential
             logging.info("Running sequentially")
             axis_dim = self._data_vol.shape[axis_i]
@@ -376,13 +386,111 @@ class cFlowDenoiser():
 
             self.filter_along_axis_chunk_worker(chunk_start_idx=0, chunk_size=chunk_size,
                                                                  kernel=kernel, axis_i=axis_i)
-        
+        elif 'multiproc' in self.process_mode:
+            self.run_OF_MP(axis_i)
+
+        else:
+            raise ValueError(f"Invaid self.process_mode:{ self.process_mode}")
 
         if __debug__:
             time_1 = time.perf_counter()
             logging.debug(f"Filtering along Z spent {time_1 - time_0} seconds")
             logging.debug(f"Min OF val: {min_OF}")
             logging.debug(f"Max OF val: {max_OF}")
+
+    def run_OF_MP(self, axis_i):
+        #Run in multiprocessing mode
+        from multiprocessing import shared_memory
+        import pathlib
+        import subprocess
+
+        # def launchSubProcessAndPrintToConsole(cmds):
+        #     #Start module
+        #     print("Starting subprocess_module using Popen")
+            
+        #     #From https://stacktuts.com/how-to-suppress-or-capture-the-output-of-subprocess-run-in-python
+        #     process = subprocess.Popen(cmds,
+        #                                 stdout=subprocess.PIPE,
+        #                                 text=True)
+        #     while True:
+        #         output = process.stdout.readline()
+        #         if output == '' and process.poll() is not None:
+        #             break
+        #         if output:
+        #             print(output.strip())
+
+        in_arr_name = "sm_in_42"
+        out_arr_name = "sm_out_42"
+
+        try:
+            sm_in = shared_memory.SharedMemory(
+                create=True,
+                size=self._data_vol.nbytes,
+                name= in_arr_name)
+            in_array_sm= np.ndarray(shape=self.data_shape,
+                dtype=self.data_type,
+                buffer=sm_in.buf)
+            in_array_sm[...] = self._data_vol[...]
+
+            sm_out = shared_memory.SharedMemory(
+                create=True,
+                size=self._data_vol.nbytes, #same size as inarray
+                name=out_arr_name)
+            outarray_sm=np.ndarray(shape=self.data_shape,
+                dtype=self.data_type,
+                buffer=sm_out.buf)
+            outarray_sm.fill(0)
+
+            axis_dim = self._data_vol.shape[axis_i]
+            logging.info(f"axis_dim:{axis_dim}")
+            logging.info(f"self.max_number_of_processes:{self.max_number_of_processes}")
+            chunk_size = axis_dim//(self.max_number_of_processes)
+
+            thisdir = pathlib.Path(__file__).parent
+            py_torun = thisdir / "_flowdenoising_subprocessMP.py"
+            print(f"torun:{str(py_torun)}")
+            #define commands and parameters here
+            cmds = ["python", py_torun,
+                    "--in_data_sh_name", in_arr_name,
+                    "--out_data_sh_name", out_arr_name,
+                    "--dtype_name", str(self.data_type),
+                    "--dshape_list", *[str(i) for i in self.data_shape], #unfolds data_shape, TODO: check it works
+                    "--process_dir", str(axis_i),
+                    "--ichunksize", str(chunk_size),
+                    "--levels", str(self.OF_LEVELS),
+                    "--winsize", str(self.OF_WINDOW_SIZE),
+                    "--ksigma_list", *[str(i) for i in self.SIGMA],
+                    "--iters", str(self.OF_ITERS),
+                    "--number_of_processes", str(self.max_number_of_processes)
+                    ]
+
+            if self.use_OF:
+                cmds.append("--useOF")
+
+            if self.bComputeFlowWithPreviousFlow:
+                cmds.append("--bComputeFlowWithPreviousFlow")
+
+            #launchSubProcessAndPrintToConsole(cmds)
+            #RUN CALCULATION IN A SEPaRATE PROCESS
+            process = subprocess.run(args=cmds, capture_output=True, text=True)
+            print("subprocess result stdout: ")
+            print(str(process.stdout))
+
+            print("subprocess result stderr:")
+            print(str(process.stderr))
+
+            # print("After subprocess, collect result from shared memory")
+            # print(str(outarray_sm))
+
+            self._filtered_vol[...]=outarray_sm[...] #Copy result
+            self.__percent__ += self.data_shape[axis_i]
+
+        except Exception as e:
+            print("Some error occurred")
+            print(str(e))
+        finally:
+            sm_in.close()
+            sm_out.unlink()
 
 
     def feedback_periodic(self,stopEv: threading.Event):
@@ -417,7 +525,7 @@ class cFlowDenoiser():
 
         logging.info(f"type of the volume = {data_vol.dtype}")
         self.data_type= data_vol.dtype
-
+        
         logging.info(f"vol requires {vol_size_bytes/(1024*1024):.1f} MB")
         logging.info(f"data max = {data_vol.max()}")
         logging.info(f"data min = {data_vol.min()}")
@@ -432,14 +540,15 @@ class cFlowDenoiser():
         #     self.get_flow = self.get_flow_with_prev_flow
         #     logging.info("Using adjacent OF fields as predictions")
 
-        sigma=self.SIGMA
-        logging.info(f"sigma={tuple(sigma)}")
+        # sigma=self.SIGMA
+        # logging.info(f"sigma={tuple(sigma)}")
 
-        kernels = [None]*3
-        kernels[0] = self.get_gaussian_kernel(sigma[0])
-        kernels[1] = self.get_gaussian_kernel(sigma[1])
-        kernels[2] = self.get_gaussian_kernel(sigma[2])
-        logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
+        self.updateKernels()
+        # kernels = [None]*3
+        # kernels[0] = self.get_gaussian_kernel(sigma[0])
+        # kernels[1] = self.get_gaussian_kernel(sigma[1])
+        # kernels[2] = self.get_gaussian_kernel(sigma[2])
+        # logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*kernels]]}")
 
 
         self._data_vol=np.array(data_vol) #Simply copies
@@ -451,7 +560,8 @@ class cFlowDenoiser():
             time_0 = time.perf_counter()
         try:
             #RUN THE FILTER
-            self.do_filter(kernels)
+            #self.do_filter(self._kernels)
+            self.do_filter()
 
             if __debug__:
                 #time_1 = time.perf_counter()        
@@ -466,6 +576,21 @@ class cFlowDenoiser():
         finally:
             self.calculation_interrupt=True
             stopEv.set()
+
+def launchSubProcessAndPrintToConsole(cmds):
+    #Start module
+    print("Starting subprocess_module using Popen")
+    import subprocess
+    #From https://stacktuts.com/how-to-suppress-or-capture-the-output-of-subprocess-run-in-python
+    process = subprocess.Popen(cmds,
+                                stdout=subprocess.PIPE,
+                                text=True)
+    while True:
+        output = process.stdout.readline()
+        if output == '' and process.poll() is not None:
+            break
+        if output:
+            print(output.strip())
 
 
 # def show_memory_usage(msg=''):
@@ -512,7 +637,8 @@ def parseArgs():
     parser.add_argument("--recompute_flow", action="store_true", help="Disable the use of adjacent optical flow fields")
     parser.add_argument("--timeout", type=int, help="Timeout after x mins. Set to -1 for no timeout. Default 30 mins", default=30)
 
-    #TODO: add do_sequentially argument
+    parser.add_argument("--procmode", choices=['threaded', 'sequential','multiproc'],
+                        default='threaded')
 
     return parser
 
@@ -530,8 +656,6 @@ def main():
     else:
         logging.basicConfig(format=LOGGING_FORMAT, level=logging.CRITICAL)
     
-
-
     if __debug__:
         logging.info(f"reading \"{args.input}\"")
         time_0 = time.perf_counter()
@@ -567,9 +691,9 @@ def main():
         bComputeFlowWithPreviousFlow= not args.recompute_flow,
         timeout_mins = args.timeout,
         use_OF= not args.no_OF,
+        process_mode=args.procmode
         )
     #filter0 = cFlowDenoiser()
-    #TODO: add do_sequentially argument
     
     # *** run the filter
     filtered_vol0= filter0.runOpticalFlow(data_vol)
