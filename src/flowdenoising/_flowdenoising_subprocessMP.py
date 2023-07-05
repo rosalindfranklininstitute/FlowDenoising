@@ -1,10 +1,11 @@
-from multiprocessing import shared_memory
+from multiprocessing import shared_memory, resource_tracker
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import argparse
 import logging
 import scipy
 import cv2
+import sys
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
@@ -40,13 +41,14 @@ class cFlowdenoiseMPrunner():
         #Set verbosity
         if self.verbosity == 2:
             logging.basicConfig(format=LOGGING_FORMAT, level=logging.DEBUG)
-            logging.info("Verbosity level = 2")
+            print("Verbosity level = 2")
         elif self.verbosity == 1:
-            logging.basicConfig(format=LOGGING_FORMAT, level=logging.INFO)
-            logging.info("Verbosity level = 1")        
+            logging.basicConfig(format=LOGGING_FORMAT, level=print)
+            print("Verbosity level = 1")        
         else:
             logging.basicConfig(format=LOGGING_FORMAT, level=logging.CRITICAL)
-    
+
+        logging.StreamHandler(sys.stdout)
 
     def updateKernels(self):
         #Note that
@@ -54,7 +56,7 @@ class cFlowdenoiseMPrunner():
         self._kernels[0] = get_gaussian_kernel(self.ksigma_list[0])
         self._kernels[1] = get_gaussian_kernel(self.ksigma_list[1])
         self._kernels[2] = get_gaussian_kernel(self.ksigma_list[2])
-        logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*self._kernels]]}")
+        print(f"length of each filter (Z, Y, X) = {[len(i) for i in [*self._kernels]]}")
 
     def run(self):
         logging.debug("subprocess_module: run()")
@@ -65,15 +67,15 @@ class cFlowdenoiseMPrunner():
 
         for i0 in range(3): #Filter along the 3 axis
             self.axis_i= i0
-            logging.info(f"Axis {self.axis_i} starting")
+            print(f"Axis {self.axis_i} starting")
             axis_dim = self._dshape[self.axis_i]
-            logging.info(f"axis_dim:{axis_dim}")
+            print(f"axis_dim:{axis_dim}")
 
-            logging.info(f"self.number_of_processes:{self.number_of_processes}")
+            print(f"self.number_of_processes:{self.number_of_processes}")
 
             chunk_size = axis_dim//(self.number_of_processes)
             n_remain_slices = axis_dim % self.number_of_processes
-            logging.info(f"n_remain_slices:{n_remain_slices}")
+            print(f"n_remain_slices:{n_remain_slices}")
 
             #Arguments for PoolExecutor
             chunk_start_indexes = [i*chunk_size for i in range(self.number_of_processes)]
@@ -86,20 +88,27 @@ class cFlowdenoiseMPrunner():
             with ProcessPoolExecutor(max_workers=self.number_of_processes) as executor:
                 tasks_range = range(nprocesses)
                 for result in executor.map(self.chunk_worker,tasks_range,chunk_start_indexes,chunk_sizes):
-                    logging.info(f"Process {result} finished")
+                    print(f"Process {result} finished")
             
-            logging.info(f"Axis {self.axis_i} completed")
+            print(f"Axis {self.axis_i} completed")
 
             #Copies contents of filtered volume to new datavol, readying for next axis
             in_sh = shared_memory.SharedMemory(name=self.in_data_sh_name)
             out_sh = shared_memory.SharedMemory(name=self.out_data_sh_name)
+            try:
+                resource_tracker.unregister(in_sh._name,"shared_memory")
+                resource_tracker.unregister(out_sh._name,"shared_memory")
+            except:
+                pass
+
             data_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=in_sh.buf)
             filtered_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=out_sh.buf)
             data_vol0[...] = filtered_vol0[...]  
+
             in_sh.close()
             out_sh.close()
 
-        logging.info("All processes completed")
+        print("All processes completed")
 
 
     def chunk_worker(self, task_i, chunk_start_idx, chunk_size):
@@ -107,6 +116,13 @@ class cFlowdenoiseMPrunner():
         in_sh = shared_memory.SharedMemory(name=self.in_data_sh_name)
         out_sh = shared_memory.SharedMemory(name=self.out_data_sh_name)
         progr_sh = shared_memory.SharedMemory(name=self.progress_sh_name)
+        
+        try:
+            resource_tracker.unregister(in_sh._name,"shared_memory")
+            resource_tracker.unregister(out_sh._name,"shared_memory")
+            resource_tracker.unregister(progr_sh._name,"shared_memory")
+        except:
+            pass
         
         try:
             data_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=in_sh.buf)
@@ -131,6 +147,11 @@ class cFlowdenoiseMPrunner():
             progr_sh.close()
             #Close but don't destroy
 
+            # in_sh.unlink()
+            # out_sh.unlink()
+            # progr_sh.unlink()
+            pass
+
         return task_i
     
     def filter_along_axis_slice(self,islice, data_vol0, filtered_vol0):
@@ -144,7 +165,7 @@ class cFlowdenoiseMPrunner():
         ks2 = kernel.size//2
         assert kernel.size== 2*ks2+1 , "Error"
         
-        #logging.info("Transposing if needed")
+        #print("Transposing if needed")
         if axis_i==0:
             data_vol_transp=data_vol0 #Potentially GIL locking making slow execution
             # data_vol_transp= data_vol0.copy() #Makes no difference in linux
@@ -194,7 +215,7 @@ class cFlowdenoiseMPrunner():
                 tmp_slice += data_vol_transp[(islice + i - ks2) % data_vol_transp.shape[0], :, :]*kernel[i]
 
 
-        #logging.info("Restoring orientation")
+        #print("Restoring orientation")
         if axis_i==0:
             filtered_vol0[islice, :, :] = tmp_slice
         elif axis_i==1:
@@ -254,13 +275,13 @@ def parseArgs():
     return parser
 
 if __name__=="__main__":
-    logging.info(f"_flowdenoising_subprocess.py, running __main__")
+    print(f"_flowdenoising_subprocess.py, running __main__")
     parser = parseArgs()
-    logging.info("arguments parsed")
+    print("arguments parsed")
 
     args_dict = vars(parser.parse_args()) #vars converts namespace to dict
-    logging.info("Args:", str(args_dict))
+    print("Args:", str(args_dict))
 
     myrunner= cFlowdenoiseMPrunner(**args_dict)
     myrunner.run()
-    logging.info("End  of _flowdenoising_subprocess __main__")
+    print("End  of _flowdenoising_subprocess __main__")

@@ -28,21 +28,17 @@ import numpy as np
 import cv2
 import scipy.ndimage
 import time
-# import imageio
-# import tifffile
 import skimage.io
 import mrcfile
 import argparse
 import threading
 
-# import concurrent
 import multiprocessing
-#from multiprocessing import shared_memory, Value
-#from concurrent.futures.process import ProcessPoolExecutor
+
 import random
-#import _thread
-#import sys
 import concurrent.futures
+
+import pathlib
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
@@ -200,6 +196,7 @@ class cFlowDenoiser():
         #When filtering is complete it continues here
         #stop feedback_thread.
         # There no stop() function to do that, so Event() is used
+        logging.info("Setting stopEv to stop feedback thread")
         stopEv.set()
 
     def filter_along_axis_slice(self,islice, kernel, axis_i):
@@ -402,9 +399,6 @@ class cFlowDenoiser():
 
             self.filter_along_axis_chunk_worker(chunk_start_idx=0, chunk_size=chunk_size,
                                                                  kernel=kernel, axis_i=axis_i)
-        elif 'multiproc' in self.process_mode:
-            self.run_OF_MP(axis_i)
-
         else:
             raise ValueError(f"Invaid self.process_mode:{ self.process_mode}")
 
@@ -415,27 +409,14 @@ class cFlowDenoiser():
             logging.debug(f"Max OF val: {max_OF}")
 
     def run_OF_MP(self):
-        #Run in multiprocessing mode
-        #Along all axis
+        logging.debug("run_OF_MP()")
 
         from multiprocessing import shared_memory
-        import pathlib
+        from multiprocessing import resource_tracker
         import subprocess
 
-        # def launchSubProcessAndPrintToConsole(cmds):
-        #     #Start module
-        #     print("Starting subprocess_module using Popen")
-            
-        #     #From https://stacktuts.com/how-to-suppress-or-capture-the-output-of-subprocess-run-in-python
-        #     process = subprocess.Popen(cmds,
-        #                                 stdout=subprocess.PIPE,
-        #                                 text=True)
-        #     while True:
-        #         output = process.stdout.readline()
-        #         if output == '' and process.poll() is not None:
-        #             break
-        #         if output:
-        #             print(output.strip())
+        #Run in multiprocessing mode
+        #Along all axis
 
         in_arr_name = "sm_in_42"
         out_arr_name = "sm_out_42"
@@ -446,6 +427,8 @@ class cFlowDenoiser():
                 create=True,
                 size=self._data_vol.nbytes,
                 name= in_arr_name)
+            logging.debug("sm_in created")
+
             in_array_sm= np.ndarray(shape=self.data_shape,
                 dtype=self.data_type,
                 buffer=sm_in.buf)
@@ -455,6 +438,7 @@ class cFlowDenoiser():
                 create=True,
                 size=self._data_vol.nbytes, #same size as inarray
                 name=out_arr_name)
+            logging.debug("sm_out created")
             outarray_sm=np.ndarray(shape=self.data_shape,
                 dtype=self.data_type,
                 buffer=sm_out.buf)
@@ -468,10 +452,25 @@ class cFlowDenoiser():
                 size=self.mp_progress_np.nbytes,
                 name= progress_arr_name)
             self.mp_progress_np = np.ndarray( (3), dtype=np.uint32, buffer=sm_progress.buf)
+            logging.debug("sm_progress created")
 
+            logging.debug("Shared memories created")
+
+            try:
+                resource_tracker.unregister(sm_in._name,"shared_memory")
+                resource_tracker.unregister(sm_out._name,"shared_memory")
+                resource_tracker.unregister(sm_progress._name,"shared_memory")
+                #Need to register back before unlinking to delete remains
+                logging.debug("Shared memories unregistered from resource tracker")
+            except:
+                logging.info("Failed to unregister shared memories. Maybe this is windows")
+            
+            #Continue
+
+            logging.debug("Setting up _flowdenoising_subprocessMP.py")
             thisdir = pathlib.Path(__file__).parent
             py_torun = thisdir / "_flowdenoising_subprocessMP.py"
-            print(f"torun:{str(py_torun)}")
+            logging.debug(f"torun:{str(py_torun)}")
             #define commands and parameters here
             cmds = ["python", py_torun,
                     "--in_data_sh_name", in_arr_name,
@@ -496,11 +495,11 @@ class cFlowDenoiser():
             #launchSubProcessAndPrintToConsole(cmds)
             #RUN CALCULATION IN A SEPaRATE PROCESS
             process = subprocess.run(args=cmds, capture_output=True, text=True)
-            print("subprocess result stdout: ")
-            print(str(process.stdout))
+            logging.debug("subprocess result stdout: ")
+            logging.debug(str(process.stdout))
 
-            print("subprocess result stderr:")
-            print(str(process.stderr))
+            logging.debug("subprocess result stderr:")
+            logging.debug(str(process.stderr))
 
             # print("After subprocess, collect result from shared memory")
             # print(str(outarray_sm))
@@ -509,15 +508,30 @@ class cFlowDenoiser():
             #self.__percent__ += self.data_shape[axis_i]
 
         except Exception as e:
-            print("Some error occurred")
-            print(str(e))
+            logging.error("Some error occurred")
+            logging.error(str(e))
         finally:
-            sm_in.close()
-            sm_in.unlink()
-            sm_out.close()
-            sm_out.unlink()
-            sm_progress.close()
-            sm_progress.unlink()
+            try:
+                sm_in.close()
+                sm_out.close()
+                sm_progress.close()
+
+                try:
+                    resource_tracker.register(sm_in._name,"shared_memory")
+                    resource_tracker.register(sm_out._name,"shared_memory")
+                    resource_tracker.register(sm_progress._name,"shared_memory")
+                except:
+                    pass
+
+                logging.debug("sm_in.unlink()")
+                sm_in.unlink()
+                logging.debug("sm_out.unlink()")
+                sm_out.unlink()
+                logging.debug("sm_progress.unlink()")
+                sm_progress.unlink()
+            except Exception as e:
+                logging.error("Error occured when trying to close and unlink shared memories")
+                logging.error(str(e))
 
 
     def feedback_periodic(self,stopEv: threading.Event):
