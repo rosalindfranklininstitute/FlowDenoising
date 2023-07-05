@@ -129,4 +129,6 @@ dmypy.json
 .pyre/
 
 *.tif
+*.tiff
 *.mrc
+scripts/result_subpMP_shell_linux.tiff
