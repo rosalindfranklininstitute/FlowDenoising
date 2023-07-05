@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flowdenoising"
-version = "0.0.0"
+version = "0.0.1"
 authors = [{ name="Vicente González Ruiz" , email="vruiz@ual.es"}]
 description = "FlowDenoising: (Optical Flow)-driven volumetric (3D) Gaussian denoising"
 readme = "README.md"

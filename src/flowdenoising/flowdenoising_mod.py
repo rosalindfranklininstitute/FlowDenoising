@@ -10,11 +10,13 @@
 # Please, refer to the LICENSE.txt to know the terms of usage of this software.
 
 """
-2023 Significantly modified version by Luis Perdigao @RFI
+2023 Significantly modified version by Luis Perdigao @RFI UK
 
-Code put in a class so that it potentially run in a notebook or integrated in other programs
+Code put in a class so that it be run in a notebook or integrated in other programs
 
-Can be ran as module, although it is slower than the multiprocess option.
+Can be ran as module.
+
+There are two ways it can do parallel calculation: threaded or multiprocess
 This is more of a problem in Linux. In windows the multi-threading seems to work fine
 
 

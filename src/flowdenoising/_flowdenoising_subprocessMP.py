@@ -8,7 +8,6 @@ import cv2
 
 LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
 
-@staticmethod
 def get_gaussian_kernel(sigma=1):
     logging.debug(f"Computing gaussian kernel with sigma={sigma}")
     number_of_coeffs = 3
