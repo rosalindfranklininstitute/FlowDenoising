@@ -73,7 +73,8 @@ class cFlowDenoiser():
         bComputeFlowWithPreviousFlow=True,
         timeout_mins = 30,
         use_OF=True,
-        process_mode='threaded', #choices=['threaded', 'sequential','multiproc']
+        process_mode='threaded', #choices=['threaded', 'sequential','multiproc'],
+        verbosity=0
         ):
 
         #print(f"levels:{levels}")
@@ -107,6 +108,10 @@ class cFlowDenoiser():
 
         # setup kernels here
         self.updateKernels()
+
+        self.verbosity=verbosity
+
+        self.mp_progress_np=None #To share progress in subprocess parallel execution
 
     def updateKernels(self):
         #Note that
@@ -170,17 +175,25 @@ class cFlowDenoiser():
         #This also means that the thread is killed when the program exits
         feddback_thread.start()
 
-        logging.info("Filtering along Z")
-        self.filter_along_axis(self._kernels[0],  axis_i=0)
-        self._data_vol[...] = self._filtered_vol[...]
+        if not 'multiproc' in self.process_mode:
+            logging.info("Filtering along Z")
+            self.filter_along_axis(self._kernels[0],  axis_i=0)
+            self._data_vol[...] = self._filtered_vol[...]
 
-        logging.info("Filtering along Y")
-        self.filter_along_axis(self._kernels[1], axis_i=1)
-        self._data_vol[...] = self._filtered_vol[...]
+            logging.info("Filtering along Y")
+            self.filter_along_axis(self._kernels[1], axis_i=1)
+            self._data_vol[...] = self._filtered_vol[...]
 
-        logging.info("Filtering along X")
-        self.filter_along_axis(self._kernels[2], axis_i=2)
-        self._data_vol[...] = self._filtered_vol[...]
+            logging.info("Filtering along X")
+            self.filter_along_axis(self._kernels[2], axis_i=2)
+            self._data_vol[...] = self._filtered_vol[...]
+        else:
+            #Run in multiprocess mode with subprocess
+            self.run_OF_MP()
+            
+            #Collect result
+            self._data_vol[...] = self._filtered_vol[...]
+
 
         #When filtering is complete it continues here
         #stop feedback_thread.
@@ -282,7 +295,7 @@ class cFlowDenoiser():
             filtered_vol0[:, :, islice] = tmp_slice
 
         # self.filtered_vol0[islice, :, :] = tmp_slice
-        self.__percent__ += 1
+
 
 
     def filter_along_axis_chunk_worker(self, chunk_start_idx, chunk_size, kernel, axis_i):
@@ -296,7 +309,8 @@ class cFlowDenoiser():
                 break
         
             #Work slice-by-slice
-            self.filter_along_axis_slice(chunk_start_idx + i , kernel, axis_i)    
+            self.filter_along_axis_slice(chunk_start_idx + i , kernel, axis_i)
+            self.__percent__ += 1
 
         return chunk_start_idx
 
@@ -398,8 +412,10 @@ class cFlowDenoiser():
             logging.debug(f"Min OF val: {min_OF}")
             logging.debug(f"Max OF val: {max_OF}")
 
-    def run_OF_MP(self, axis_i):
+    def run_OF_MP(self):
         #Run in multiprocessing mode
+        #Along all axis
+
         from multiprocessing import shared_memory
         import pathlib
         import subprocess
@@ -421,6 +437,7 @@ class cFlowDenoiser():
 
         in_arr_name = "sm_in_42"
         out_arr_name = "sm_out_42"
+        progress_arr_name = "sm_progress_42"
 
         try:
             sm_in = shared_memory.SharedMemory(
@@ -441,10 +458,14 @@ class cFlowDenoiser():
                 buffer=sm_out.buf)
             outarray_sm.fill(0)
 
-            axis_dim = self._data_vol.shape[axis_i]
-            logging.info(f"axis_dim:{axis_dim}")
-            logging.info(f"self.max_number_of_processes:{self.max_number_of_processes}")
-            chunk_size = axis_dim//(self.max_number_of_processes)
+            #Create shared memory for checking progress in parallel process(es)
+            #Progress in each axis
+            self.mp_progress_np=np.zeros(3, dtype=np.uint32)
+            sm_progress = shared_memory.SharedMemory(
+                create=True,
+                size=self.mp_progress_np.nbytes,
+                name= progress_arr_name)
+            self.mp_progress_np = np.ndarray( (3), dtype=np.uint32, buffer=sm_progress.buf)
 
             thisdir = pathlib.Path(__file__).parent
             py_torun = thisdir / "_flowdenoising_subprocessMP.py"
@@ -455,13 +476,13 @@ class cFlowDenoiser():
                     "--out_data_sh_name", out_arr_name,
                     "--dtype_name", str(self.data_type),
                     "--dshape_list", *[str(i) for i in self.data_shape], #unfolds data_shape, TODO: check it works
-                    "--process_dir", str(axis_i),
-                    "--ichunksize", str(chunk_size),
                     "--levels", str(self.OF_LEVELS),
                     "--winsize", str(self.OF_WINDOW_SIZE),
                     "--ksigma_list", *[str(i) for i in self.SIGMA],
                     "--iters", str(self.OF_ITERS),
-                    "--number_of_processes", str(self.max_number_of_processes)
+                    "--number_of_processes", str(self.max_number_of_processes),
+                    "--verbosity", str(self.verbosity),
+                    "--progress_sh_name", progress_arr_name,
                     ]
 
             if self.use_OF:
@@ -483,14 +504,18 @@ class cFlowDenoiser():
             # print(str(outarray_sm))
 
             self._filtered_vol[...]=outarray_sm[...] #Copy result
-            self.__percent__ += self.data_shape[axis_i]
+            #self.__percent__ += self.data_shape[axis_i]
 
         except Exception as e:
             print("Some error occurred")
             print(str(e))
         finally:
             sm_in.close()
+            sm_in.unlink()
+            sm_out.close()
             sm_out.unlink()
+            sm_progress.close()
+            sm_progress.unlink()
 
 
     def feedback_periodic(self,stopEv: threading.Event):
@@ -508,7 +533,11 @@ class cFlowDenoiser():
                     stopEv.set()
                     self.calculation_interrupt=True
 
+            if not self.mp_progress_np is None:
+                self.__percent__= np.sum(self.mp_progress_np)
+
             logging.info(f"{self.__percent__}/{n_iterations} completed")
+
             time.sleep(1)
         logging.debug("feedback_periodic thread stopped.")
 
@@ -577,20 +606,20 @@ class cFlowDenoiser():
             self.calculation_interrupt=True
             stopEv.set()
 
-def launchSubProcessAndPrintToConsole(cmds):
-    #Start module
-    print("Starting subprocess_module using Popen")
-    import subprocess
-    #From https://stacktuts.com/how-to-suppress-or-capture-the-output-of-subprocess-run-in-python
-    process = subprocess.Popen(cmds,
-                                stdout=subprocess.PIPE,
-                                text=True)
-    while True:
-        output = process.stdout.readline()
-        if output == '' and process.poll() is not None:
-            break
-        if output:
-            print(output.strip())
+# def launchSubProcessAndPrintToConsole(cmds):
+#     #Start module
+#     print("Starting subprocess_module using Popen")
+#     import subprocess
+#     #From https://stacktuts.com/how-to-suppress-or-capture-the-output-of-subprocess-run-in-python
+#     process = subprocess.Popen(cmds,
+#                                 stdout=subprocess.PIPE,
+#                                 text=True)
+#     while True:
+#         output = process.stdout.readline()
+#         if output == '' and process.poll() is not None:
+#             break
+#         if output:
+#             print(output.strip())
 
 
 # def show_memory_usage(msg=''):
@@ -691,7 +720,8 @@ def main():
         bComputeFlowWithPreviousFlow= not args.recompute_flow,
         timeout_mins = args.timeout,
         use_OF= not args.no_OF,
-        process_mode=args.procmode
+        process_mode=args.procmode,
+        verbosity=args.verbosity
         )
     #filter0 = cFlowDenoiser()
     

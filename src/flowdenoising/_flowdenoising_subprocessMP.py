@@ -6,6 +6,8 @@ import logging
 import scipy
 import cv2
 
+LOGGING_FORMAT = "[%(asctime)s] (%(levelname)s) %(message)s"
+
 @staticmethod
 def get_gaussian_kernel(sigma=1):
     logging.debug(f"Computing gaussian kernel with sigma={sigma}")
@@ -29,12 +31,23 @@ class cFlowdenoiseMPrunner():
         #All these attributes will be the same amongst other processes.
         for k, v in kwargs.items():
             setattr(self, k, v)
-            print(k,":",v)
+            #print(k,":",v)
 
         
         self._dshape = tuple(self.dshape_list)
 
         self.updateKernels()
+
+        #Set verbosity
+        if self.verbosity == 2:
+            logging.basicConfig(format=LOGGING_FORMAT, level=logging.DEBUG)
+            logging.info("Verbosity level = 2")
+        elif self.verbosity == 1:
+            logging.basicConfig(format=LOGGING_FORMAT, level=logging.INFO)
+            logging.info("Verbosity level = 1")        
+        else:
+            logging.basicConfig(format=LOGGING_FORMAT, level=logging.CRITICAL)
+    
 
     def updateKernels(self):
         #Note that
@@ -42,111 +55,87 @@ class cFlowdenoiseMPrunner():
         self._kernels[0] = get_gaussian_kernel(self.ksigma_list[0])
         self._kernels[1] = get_gaussian_kernel(self.ksigma_list[1])
         self._kernels[2] = get_gaussian_kernel(self.ksigma_list[2])
-        print(f"length of each filter (Z, Y, X) = {[len(i) for i in [*self._kernels]]}")
+        logging.info(f"length of each filter (Z, Y, X) = {[len(i) for i in [*self._kernels]]}")
 
     def run(self):
-        print("subprocess_module: run()")
+        logging.debug("subprocess_module: run()")
         # print("subprocess_module: __name__:", str(__name__))
         # print("subprocess_module: __file__:", str(__file__))
 
         #Launch multiprocesses based in the information
 
-        axis_dim = self._dshape[self.process_dir]
-        chunk_size = axis_dim//(self.number_of_processes)
-        n_remain_slices = axis_dim % self.number_of_processes
-        logging.info(f"n_remain_slices:{n_remain_slices}")
+        for i0 in range(3): #Filter along the 3 axis
+            self.axis_i= i0
+            logging.info(f"Axis {self.axis_i} starting")
+            axis_dim = self._dshape[self.axis_i]
+            logging.info(f"axis_dim:{axis_dim}")
 
-        #Arguments for PoolExecutor
-        chunk_start_indexes = [i*chunk_size for i in range(self.number_of_processes)]
-        chunk_sizes = [chunk_size]*(self.number_of_processes)
-        if n_remain_slices>0: #last slices
-            chunk_start_indexes.append(self.number_of_processes*chunk_size )
-            chunk_sizes.append(n_remain_slices)
- 
-        nprocesses = len(chunk_start_indexes)
-        with ProcessPoolExecutor(max_workers=self.number_of_processes) as executor:
-            tasks_range = range(nprocesses)
-            for result in executor.map(self.chunk_worker,tasks_range,chunk_start_indexes,chunk_sizes):
-                print(f"Process {result} finished")
+            logging.info(f"self.number_of_processes:{self.number_of_processes}")
 
-        print("All processes completed")
+            chunk_size = axis_dim//(self.number_of_processes)
+            n_remain_slices = axis_dim % self.number_of_processes
+            logging.info(f"n_remain_slices:{n_remain_slices}")
 
+            #Arguments for PoolExecutor
+            chunk_start_indexes = [i*chunk_size for i in range(self.number_of_processes)]
+            chunk_sizes = [chunk_size]*(self.number_of_processes)
+            if n_remain_slices>0: #last slices
+                chunk_start_indexes.append(self.number_of_processes*chunk_size )
+                chunk_sizes.append(n_remain_slices)
+    
+            nprocesses = len(chunk_start_indexes)
+            with ProcessPoolExecutor(max_workers=self.number_of_processes) as executor:
+                tasks_range = range(nprocesses)
+                for result in executor.map(self.chunk_worker,tasks_range,chunk_start_indexes,chunk_sizes):
+                    logging.info(f"Process {result} finished")
+            
+            logging.info(f"Axis {self.axis_i} completed")
 
-    # def chunk_worker(self, task_i, chunk_start_idx, chunk_size):
-    #     in_sh = shared_memory.SharedMemory(name=self.in_data_sh_name)
-    #     out_sh = shared_memory.SharedMemory(name=self.out_data_sh_name)
-        
-    #     try:
-    #         inarray = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=in_sh.buf)
-    #         outarray = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=out_sh.buf)
+            #Copies contents of filtered volume to new datavol, readying for next axis
+            in_sh = shared_memory.SharedMemory(name=self.in_data_sh_name)
+            out_sh = shared_memory.SharedMemory(name=self.out_data_sh_name)
+            data_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=in_sh.buf)
+            filtered_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=out_sh.buf)
+            data_vol0[...] = filtered_vol0[...]  
+            in_sh.close()
+            out_sh.close()
 
-    #         #Run code
-
-    #         for islice in range(chunk_start_idx, chunk_start_idx+chunk_size):
-    #             #Work slice-by-slice
-
-    #             #Get slice
-    #             if self.process_dir==0:
-    #                 data_vol_transp = inarray
-    #                 # data_vol_transp= data_vol0.copy() #Makes no difference in linux
-    #             elif self.process_dir==1:
-    #                 data_vol_transp=np.transpose(inarray,axes=(1,0,2))
-    #             elif self.process_dir==2:
-    #                 data_vol_transp=np.transpose(inarray,axes=(2,0,1))
-
-    #             data_islice = data_vol_transp[islice,:,:]
-    #             #data_islice = data_roi[ks2,:,:]
-    #             tmp_slice = np.zeros_like(data_islice).astype(np.float32)
-    #             slice_shape= tmp_slice.shape
-
-    #             for ix in range(slice_shape[0]):
-    #                 for iy in range(slice_shape[1]):
-    #                     tmp_slice[ix,iy]= islice
-                
-    #             if self.process_dir==0:
-    #                 outarray[islice, :, :] = tmp_slice
-    #             elif self.process_dir==1:
-    #                 outarray[:, islice, :] = tmp_slice
-    #             elif self.process_dir==2:
-    #                 outarray[:, :, islice] = tmp_slice
-
-    #     except Exception as e:
-    #         print("ERROR: The following error occurred:")
-    #         print(str(e))
-    #     finally:
-    #         in_sh.close()
-    #         out_sh.close()
-
-    #     return task_i
+        logging.info("All processes completed")
 
 
     def chunk_worker(self, task_i, chunk_start_idx, chunk_size):
+        # gets shared memory
         in_sh = shared_memory.SharedMemory(name=self.in_data_sh_name)
         out_sh = shared_memory.SharedMemory(name=self.out_data_sh_name)
+        progr_sh = shared_memory.SharedMemory(name=self.progress_sh_name)
         
         try:
             data_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=in_sh.buf)
             filtered_vol0 = np.ndarray(self._dshape, dtype=self.dtype_name, buffer=out_sh.buf)
-
-            #Run code
+            progress0 = np.ndarray((3), dtype=np.uint32, buffer=progr_sh.buf)
 
             for i in range(chunk_size):
                 #Work slice-by-slice
                 self.filter_along_axis_slice(chunk_start_idx + i , data_vol0, filtered_vol0)    
 
-            return chunk_start_idx
+                #Update progress
+                progress0[self.axis_i]+=1
+
+            return task_i
 
         except Exception as e:
-            print("ERROR: The following error occurred:")
-            print(str(e))
+            logging.error("ERROR: The following error occurred:")
+            logging.error(str(e))
         finally:
             in_sh.close()
             out_sh.close()
+            progr_sh.close()
+            #Close but don't destroy
 
         return task_i
     
     def filter_along_axis_slice(self,islice, data_vol0, filtered_vol0):
-        axis_i = self.process_dir
+        axis_i = self.axis_i
         logging.debug(f"filter_along_axis_slice() with islice:{islice},  axis_i:{axis_i}")
  
         kernel= self._kernels[axis_i]
@@ -184,7 +173,6 @@ class cFlowdenoiseMPrunner():
                 OF_compensated_slice = self.warp_slice(ref, flow)
                 tmp_slice += OF_compensated_slice * kernel[i]
                 #i_values.append(i)  
-            #print(f"i_values down:{i_values}")
 
             tmp_slice += data_islice * kernel[ks2] #Middle slice, no OF needed, just kernel convolve
             #i_values.append(ks2)
@@ -197,8 +185,7 @@ class cFlowdenoiseMPrunner():
                 prev_flow = flow
                 OF_compensated_slice = self.warp_slice(ref, flow)
                 tmp_slice += OF_compensated_slice * kernel[i]
-                #i_values.append(i)
-            #print(f"i_values down-up:{i_values}")           
+                #i_values.append(i)         
 
         else:
             #No OF
@@ -216,8 +203,6 @@ class cFlowdenoiseMPrunner():
         elif axis_i==2:
             filtered_vol0[:, :, islice] = tmp_slice
 
-        # self.filtered_vol0[islice, :, :] = tmp_slice
-        # self.__percent__ += 1
 
     def warp_slice(self,reference, flow):
         height, width = flow.shape[:2]
@@ -255,8 +240,6 @@ def parseArgs():
                         type=str)
     parser.add_argument("--dtype_name", type=str)
     parser.add_argument("--dshape_list", nargs="+", type=int)
-    parser.add_argument("--process_dir", type=int, help="direction 0,1 or 2 for z,y,x")
-    parser.add_argument("--ichunksize", type=int)
     parser.add_argument("--levels", type=int)
     parser.add_argument("--winsize", type=int)
     parser.add_argument("--bComputeFlowWithPreviousFlow", action="store_true")
@@ -264,18 +247,21 @@ def parseArgs():
     parser.add_argument("--ksigma_list", type=float, nargs="+", help="kernel size")
     parser.add_argument("--iters", type=int)
     parser.add_argument("--number_of_processes", type=int, help="number of processes")
+    parser.add_argument("--verbosity", type=int, help="Verbosity level", default=0)
+    parser.add_argument("--progress_sh_name",
+                        help="Progress shared memory name",
+                        type=str)
 
     return parser
 
 if __name__=="__main__":
-    print(f"subprocess_module.py, running __main__")
+    logging.info(f"_flowdenoising_subprocess.py, running __main__")
     parser = parseArgs()
-    print("arguments parsed")
+    logging.info("arguments parsed")
 
     args_dict = vars(parser.parse_args()) #vars converts namespace to dict
-    print("Args")
-    print(args_dict)
+    logging.info("Args:", str(args_dict))
 
     myrunner= cFlowdenoiseMPrunner(**args_dict)
     myrunner.run()
-    print("End  of _flowdenoisingprocess")
+    logging.info("End  of _flowdenoising_subprocess __main__")
